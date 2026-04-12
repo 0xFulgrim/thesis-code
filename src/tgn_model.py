@@ -16,18 +16,6 @@ Novel metric — Detection Latency (TGN-exclusive):
     latency = timestamp of first alert − timestamp of first laundering transaction
   Lower is better. Not reported for static baselines (they see the entire
   test graph at once rather than processing transactions as they arrive).
-
-Improvements over v2:
-  - Validation split (60/10/30) with early stopping on val AUC.
-  - Gradient clipping (max norm 1.0).
-  - pos_weight computed from training split only (not full dataset).
-  - train_epoch refactored from closure to proper function with explicit args.
-  - Latency resolution no longer re-iterates test_loader — probs/timestamps
-    are stored during the eval pass and resolved post-hoc.
-
-Run:
-  python src/tgn_model.py
-  python src/tgn_model.py --memory_dim 64 --embedding_dim 64 --batch_size 64  # laptop
 """
 
 import argparse
