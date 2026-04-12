@@ -1,0 +1,14 @@
+{
+  "threshold": 0.9997,
+  "auc_roc": 0.9079373048427373,
+  "avg_precision": 0.134394312396309,
+  "f1": 0.21786389413988658,
+  "precision": 0.2412349555206698,
+  "recall": 0.1986212839293408,
+  "detection_latency": {
+    "mean_latency_seconds": 23535.68938193344,
+    "median_latency_seconds": 0.0,
+    "detected_mules": 631,
+    "total_mule_accounts": 2844
+  }
+}
