@@ -7,15 +7,6 @@ Approach:
     temporal diversity, fan-in/out ratios, coefficient of variation).
   - LightGBM gradient boosted trees with class_weight="balanced".
   - Account-level evaluation: is this account a mule?
-
-Threshold:
-  Fixed 0.5 is inappropriate for imbalanced data (~1.5% mule prevalence).
-  We sweep the precision-recall curve to find the F1-optimal threshold.
-  The chosen threshold is saved in the metrics JSON for reproducibility.
-
-Run:
-  python src/lightgbm_model.py
-  python src/lightgbm_model.py --data data/raw/HI-Small_Trans.csv
 """
 
 import argparse
@@ -83,7 +74,7 @@ def main() -> None:
 
     # ── 3. Split ──────────────────────────────────────────────────────────────
     # Random split is valid — LightGBM treats each account independently.
-    # We create a val set explicitly for early stopping so the test set stays
+    # Create a val set explicitly for early stopping so the test set stays
     # completely held out (not peeked at during training).
     X_trainval, X_test, y_trainval, y_test = train_test_split(
         X, y, test_size=args.test_size, random_state=SEED, stratify=y,
