@@ -10,19 +10,6 @@ Approach:
     Two SAGEConv layers + BatchNorm + linear classification head.
   - Mini-batch training via NeighborLoader.
   - Validation split for early stopping — test set never touched during training.
-
-Improvements over v2:
-  - BatchNorm after each SAGEConv layer: stabilises training on heterogeneous
-    account graphs where node degree variance is very high.
-  - Gradient clipping (max norm 1.0): prevents exploding gradients, which can
-    occur silently when a few high-degree hub nodes dominate the gradient signal.
-  - ReduceLROnPlateau scheduler: decays LR when val AUC stops improving.
-  - Explicit val split: early stopping based on val AUC-ROC, not train loss.
-    This is important because train loss can keep decreasing while the model
-    overfits on the majority class.
-
-Run:
-  python src/graphsage_model.py
 """
 
 import argparse
