@@ -10,30 +10,6 @@ Approach:
   - Two GATv2Conv layers (4 heads concat → 1 head) + BatchNorm + linear head.
   - Mini-batch training via NeighborLoader.
   - Validation split for early stopping — test set never touched during training.
-
-Key difference from GraphSAGE:
-  GraphSAGE aggregates with a fixed mean operator.
-  GATv2 learns dynamic per-edge attention weights — the attention is
-  conditioned on both the source and target node (unlike the original GAT
-  which only conditions on the source). More expressive, same cost.
-
-Why GATv2 over GAT:
-  Original GAT uses a static attention function: a(Wh_i, Wh_j) which applies
-  the same projection to both nodes before combining. GATv2 applies a
-  non-linear transformation before scoring: a(W[h_i || h_j]) making it
-  strictly more expressive. On irregular graphs like AML networks, this
-  matters for distinguishing structurally similar but semantically different
-  neighbours.
-
-Improvements over v2:
-  - GATv2Conv replaces GATConv.
-  - BatchNorm after each conv layer.
-  - Gradient clipping (max norm 1.0).
-  - ReduceLROnPlateau scheduler.
-  - Explicit val split with early stopping based on val AUC.
-
-Run:
-  python src/gat_model.py
 """
 
 import argparse
@@ -68,7 +44,6 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 class FocalLoss(torch.nn.Module):
     """
     Focal Loss (Lin et al. 2017) for extreme class imbalance.
-    See graphsage_model.py for full docstring.
     """
 
     def __init__(self, alpha: float = 0.25, gamma: float = 2.0):
