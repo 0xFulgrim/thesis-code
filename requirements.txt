@@ -1,15 +1,13 @@
 # Python 3.10.  Install with:  pip install -r requirements.txt
 #
-# The PyTorch Geometric extension packages (torch-scatter, torch-sparse) are
-# not on PyPI as prebuilt wheels; the CPU builds for torch 2.1 come from here:
+# torch-scatter is not on PyPI as a prebuilt wheel; the CPU build for
+# torch 2.1 comes from here:
 --find-links https://data.pyg.org/whl/torch-2.1.0+cpu.html
 
 numpy==1.26.4        # torch 2.1 is built against NumPy 1.x and fails with 2.x
 pandas==2.3.3
 scikit-learn==1.7.2
-lightgbm==4.6.0
 torch==2.1.0
 torch-geometric==2.7.0
 torch-scatter==2.1.2+pt21cpu
-torch-sparse==0.6.18+pt21cpu
 packaging==26.0      # imported by torch 2.1 at runtime, but not declared by it
