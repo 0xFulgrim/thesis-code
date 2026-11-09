@@ -18,6 +18,9 @@ import numpy as np
 from sklearn.model_selection import train_test_split
 
 from utils import (
+    DEFAULT_TRANS_PATH,
+    OUTPUTS_DIR,
+    SEED,
     build_account_labels,
     compute_metrics,
     engineer_tabular_features,
@@ -28,13 +31,10 @@ from utils import (
     set_seed,
 )
 
-SEED = 42
-OUTPUTS_DIR = "outputs"
-
 
 def get_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="LightGBM mule detector")
-    p.add_argument("--data",          default="data/raw/HI-Small_Trans.csv")
+    p.add_argument("--data",          default=DEFAULT_TRANS_PATH)
     p.add_argument("--test_size",     type=float, default=0.2)
     p.add_argument("--val_size",      type=float, default=0.1,
                    help="Fraction of training data held out for early stopping")

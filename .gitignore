@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+
+# Dataset — downloaded from Kaggle, see README
+data/
+
+# TGN checkpoint: holds a memory vector for every account, so it is large
+outputs/tgn_model.pt
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
