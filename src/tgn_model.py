@@ -35,19 +35,18 @@ from torch_geometric.nn.models.tgn import (
 )
 
 from utils import (
+    DEFAULT_TRANS_PATH,
+    OUTPUTS_DIR,
+    SEED,
     build_temporal_data,
     compute_metrics,
+    device,
     find_best_threshold,
     load_transactions,
     print_confusion_matrix,
     print_metrics,
     set_seed,
 )
-
-SEED = 42
-OUTPUTS_DIR = "outputs"
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 
 # ── Sub-modules ───────────────────────────────────────────────────────────────
 
@@ -121,14 +120,16 @@ def train_epoch(
     Memory and neighbor_loader are reset at the start of each epoch so
     the model always begins epoch k with a clean slate.
     """
-    memory.train(); gnn.train(); classifier.train()
+    memory.train()
+    gnn.train()
+    classifier.train()
     memory.reset_state()
     neighbor_loader.reset_state()
 
     total_loss  = 0.0
     n_processed = 0
 
-    for batch_idx, batch in enumerate(loader):
+    for batch in loader:
         optimizer.zero_grad()
         batch = batch.to(device)
 
@@ -185,7 +186,9 @@ def eval_stream(
     update_memory: set True during val/test to simulate live deployment
     (model keeps learning from observed transactions even during evaluation).
     """
-    memory.eval(); gnn.eval(); classifier.eval()
+    memory.eval()
+    gnn.eval()
+    classifier.eval()
 
     all_probs:  list = []
     all_labels: list = []
@@ -281,7 +284,7 @@ def compute_detection_latency(
 
 def get_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="TGN streaming mule detector")
-    p.add_argument("--data",          default="data/raw/HI-Small_Trans.csv")
+    p.add_argument("--data",          default=DEFAULT_TRANS_PATH)
     p.add_argument("--memory_dim",    type=int,   default=128)
     p.add_argument("--time_dim",      type=int,   default=128)
     p.add_argument("--embedding_dim", type=int,   default=128)
@@ -289,7 +292,6 @@ def get_args() -> argparse.Namespace:
     p.add_argument("--lr",            type=float, default=1e-4)
     p.add_argument("--batch_size",    type=int,   default=200)
     p.add_argument("--neighbor_size", type=int,   default=10)
-    p.add_argument("--detach_every",  type=int,   default=50)
     p.add_argument("--max_grad_norm", type=float, default=1.0)
     p.add_argument("--patience",      type=int,   default=5,
                    help="Early stopping patience (epochs, based on val AUC)")
@@ -309,8 +311,8 @@ def main() -> None:
 
     # ── 1. Load data ──────────────────────────────────────────────────────────
     print("[1/5] Loading data and building temporal graph...")
-    df                   = load_transactions(args.data)
-    data, account_to_idx = build_temporal_data(df)
+    df      = load_transactions(args.data)
+    data, _ = build_temporal_data(df)
 
     num_nodes  = int(max(data.src.max(), data.dst.max())) + 1
     num_events = data.num_events

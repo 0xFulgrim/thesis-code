@@ -1,5 +1,6 @@
 """
-utils.py — Shared data loading, feature engineering, graph construction, and metrics.
+utils.py — Shared settings, data loading, feature engineering, graph
+construction, and metrics.
 
 IBM AML HI-Small dataset expected at data/raw/HI-Small_Trans.csv.
 """
@@ -22,12 +23,16 @@ from sklearn.metrics import (
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from torch_geometric.data import Data, TemporalData
 
+SEED               = 42
+OUTPUTS_DIR        = "outputs"
 DEFAULT_TRANS_PATH = os.path.join("data", "raw", "HI-Small_Trans.csv")
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 # ── Reproducibility ───────────────────────────────────────────────────────────
 
-def set_seed(seed: int = 42) -> None:
+def set_seed(seed: int = SEED) -> None:
     """Fix all relevant random seeds for reproducible runs."""
     random.seed(seed)
     np.random.seed(seed)
@@ -151,7 +156,6 @@ def build_static_graph(df: pd.DataFrame) -> tuple:
     """
     all_accounts   = sorted(set(df["from_id"]) | set(df["to_id"]))
     account_to_idx = {acc: i for i, acc in enumerate(all_accounts)}
-    n              = len(all_accounts)
 
     # Node labels — vectorised via reindex instead of per-account loop
     labels = build_account_labels(df)
