@@ -11,9 +11,10 @@ and their results are in the history at commit `7b33ef4`.
 
 ## Results
 
-All numbers are for the test split of `HI-Small_Trans.csv` (the last 30% of
-the stream: 1,523,504 transactions, 2,321 of them laundering), with the
+All numbers are for the test split (the last 30% of the stream), with the
 decision threshold chosen on the validation split. AP is average precision.
+
+**HI-Small** (test split: 1,523,504 transactions, 2,321 of them laundering)
 
 | Model | Test AP | F1 | Precision | Recall | AP without quiet days | F1 without quiet days |
 |---|---|---|---|---|---|---|
@@ -32,7 +33,18 @@ their first laundering transaction in the test stream. See "Reading the
 scores" for what the quiet days are and why recall cannot get much past 0.7
 on this file.
 
-What each change contributed, one run each with the same seed:
+**HI-Medium** (test split: 9,569,472 transactions, 14,147 of them
+laundering), one run with the same settings at batch 4000:
+
+| Model | Test AP | F1 | Precision | Recall | AP without quiet days | F1 without quiet days |
+|---|---|---|---|---|---|---|
+| Current model, one run | 0.726 | 0.745 | 0.886 | 0.642 | 0.623 | 0.661 |
+
+It flags 10,250 transactions, 9,082 of them correctly, and raises an alert on
+9,787 of the 17,121 accounts involved in laundering. Training took 30 epochs
+of about 4 to 5 minutes each on an H100 that other runs were sharing.
+
+**What each change contributed** on HI-Small, one run each with the same seed:
 
 | | Validation AP | Test AP | Test F1 |
 |---|---|---|---|
@@ -45,8 +57,9 @@ What each change contributed, one run each with the same seed:
 | Two attention layers, 30 neighbours | 0.607 | 0.655 | 0.669 |
 | Two attention layers, 50 neighbours (the default) | 0.624 | 0.667 | 0.682 |
 
-The metrics files behind the first table are in `outputs/`: `hi-small/` for
-the five runs and their average, `first-version/` for the first version.
+The metrics files behind the first two tables are in `outputs/`: `hi-small/`
+for the five runs and their average, `hi-medium/`, and `first-version/` for
+the first version.
 
 Differences of about 0.01 in validation AP and 0.02 in test F1 are within the
 spread between seeds; in particular 30 and 50 neighbours are not
