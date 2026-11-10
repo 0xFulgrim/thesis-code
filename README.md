@@ -49,7 +49,8 @@ and 153 minutes on an H100 that other runs were sharing.
 | | Validation AP | Test AP | Test F1 |
 |---|---|---|---|
 | Balanced class weight and gradient clipping (the first version's training settings) | 0.332 | 0.371 | 0.388 |
-| Unweighted loss, no clipping | 0.528 | 0.576 | 0.599 |
+| Unweighted loss, no clipping | 0.527 | 0.599 | 0.620 |
+| Batch 1000 and learning rate 3e-4 instead of 200 and 1e-4 (a quarter of the time per epoch) | 0.528 | 0.576 | 0.599 |
 | + payment direction and same-bank flag | 0.530 | 0.561 | 0.580 |
 | + account activity statistics and pair history | 0.562 | 0.602 | 0.619 |
 | + shared-counterparty and fan-in/fan-out counts | 0.562 | 0.612 | 0.632 |
