@@ -18,16 +18,19 @@ decision threshold chosen on the validation split. AP is average precision.
 | Model | Test AP | F1 | Precision | Recall | AP without quiet days | F1 without quiet days |
 |---|---|---|---|---|---|---|
 | First version of this code (threshold tuned on the test split) | 0.134 | 0.218 | 0.241 | 0.199 | | |
-| Current model, one run (mean of 4 seeds) | 0.655 | 0.657 | 0.735 | 0.597 | 0.538 | 0.558 |
-| Current model, average of the 4 runs | 0.682 | 0.703 | 0.798 | 0.628 | 0.567 | 0.609 |
+| Current model, one run (mean of 5 seeds) | 0.661 | 0.662 | 0.732 | 0.605 | 0.546 | 0.564 |
+| Current model, average of the 5 runs | 0.688 | 0.678 | 0.709 | 0.650 | 0.573 | 0.576 |
 
-The four runs used 30 neighbours; a single run with the default 50 scores
-AP 0.667 and F1 0.682. The averaged model flags 1,827 transactions, 1,458 of
-them correctly, and raises an alert on 1,553 of the 2,844 accounts involved
-in laundering. For at least nine in ten of those accounts the alert comes in
-the same minute as their first laundering transaction in the test stream.
-See "Reading the scores" for what the quiet days are and why recall cannot
-get much past 0.7 on this file.
+Between seeds, AP varies by about 0.006 and F1 by about 0.013 (standard
+deviation). F1 depends on the validation-chosen threshold more than AP does:
+an average of four earlier runs scored AP 0.682 and F1 0.703.
+
+The averaged model flags 2,129 transactions, 1,509 of them correctly, and
+raises an alert on 1,606 of the 2,844 accounts involved in laundering. For at
+least nine in ten of those accounts the alert comes in the same minute as
+their first laundering transaction in the test stream. See "Reading the
+scores" for what the quiet days are and why recall cannot get much past 0.7
+on this file.
 
 What each change contributed, one run each with the same seed:
 
@@ -43,8 +46,10 @@ What each change contributed, one run each with the same seed:
 | Two attention layers, 50 neighbours (the default) | 0.624 | 0.667 | 0.682 |
 
 Differences of about 0.01 in validation AP and 0.02 in test F1 are within the
-spread between seeds. Leaving the transaction's own attributes out of the
-classifier costs about 0.08 validation AP.
+spread between seeds; in particular 30 and 50 neighbours are not
+distinguishable (test AP 0.655 over four seeds against 0.661 over five).
+Leaving the transaction's own attributes out of the classifier costs about
+0.08 validation AP.
 
 ## Setup
 
