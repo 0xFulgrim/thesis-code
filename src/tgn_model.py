@@ -792,6 +792,9 @@ def main(argv: list | None = None) -> dict:
     cpu_threads = args.cpu_threads or (2 if device.type == "cuda" else None)
     if cpu_threads is not None:
         torch.set_num_threads(cpu_threads)
+    # TF32 matrix products on the GPU: about 10% faster here, at a precision
+    # loss far below the noise between seeds.
+    torch.set_float32_matmul_precision("high")
 
     os.makedirs(args.out_dir, exist_ok=True)
     model_path = os.path.join(args.out_dir, "tgn_model.pt")
