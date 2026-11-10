@@ -204,6 +204,69 @@ def test_attention_is_told_which_way_the_money_went():
     assert not torch.allclose(score_of_second(one_way), score_of_second(other_way))
 
 
+def test_neighborhood_matches_the_library_lookup(csv_path):
+    """Same accounts and same edges as torch_geometric's own lookup, called once per layer."""
+    events = load_events(csv_path, use_cache=False, log=lambda _m: None)
+    for num_layers in (1, 2):
+        model = small_model(events, num_layers=num_layers)
+        score_stream(model, events, 0, 600, 50)
+        batch = events.rows(slice(600, 650), model.device)
+        seeds = torch.cat([batch.src, batch.dst]).unique()
+
+        n_id, edge_index, e_id, num_seed_edges = model.neighborhood(seeds)
+        ours = {(int(n_id[s]), int(n_id[t]), int(e)) for s, t, e in zip(*edge_index, e_id, strict=True)}
+
+        ref_n_id, ref_edge_index, ref_e_id = model.neighbors(seeds)
+        for _ in range(num_layers - 1):
+            ref_n_id, ref_edge_index, ref_e_id = model.neighbors(ref_n_id)
+        reference = {(int(ref_n_id[s]), int(ref_n_id[t]), int(e))
+                     for s, t, e in zip(*ref_edge_index, ref_e_id, strict=True)}
+
+        assert ours == reference
+        assert torch.equal(n_id, ref_n_id)
+        # The leading edges are exactly the ones into the seeds.
+        into_seed = torch.isin(n_id[edge_index[1]], seeds)
+        assert into_seed[:num_seed_edges].all() and not into_seed[num_seed_edges:].any()
+
+
+def test_last_layer_on_seed_edges_changes_nothing(csv_path):
+    events = load_events(csv_path, use_cache=False, log=lambda _m: None)
+    model = small_model(events, num_layers=2)
+    score_stream(model, events, 0, 600, 50)
+    model.eval()
+    batch = events.rows(slice(600, 650), model.device)
+    seeds = torch.cat([batch.src, batch.dst]).unique()
+    with torch.no_grad():
+        n_id, edge_index, e_id, num_seed_edges = model.neighborhood(seeds)
+        memory, last_update = model.memory(n_id)
+        past = events.rows(e_id, model.device)
+        was_payer = (past.src == n_id[edge_index[1]]).float().unsqueeze(-1)
+        features = torch.cat([model.encoder(past), was_payer], dim=-1)
+        shortcut = model.gnn(memory, last_update, edge_index, past.t, features, num_seed_edges)
+        everything = model.gnn(memory, last_update, edge_index, past.t, features)
+    rows = model.assoc[seeds]
+    assert num_seed_edges < e_id.numel()
+    assert torch.allclose(shortcut[rows], everything[rows], atol=1e-5)
+
+
+def test_hop2_size_limits_the_second_hop(csv_path):
+    events = load_events(csv_path, use_cache=False, log=lambda _m: None)
+    set_seed(0)
+    model = TGN(events.num_nodes, TransactionEncoder.fit(events, events.num_events), 16, 8, 16, 5,
+                True, torch.device("cpu"), num_layers=2, hop2_size=2)
+    score_stream(model, events, 0, 600, 50)
+    batch = events.rows(slice(600, 650), model.device)
+    seeds = torch.cat([batch.src, batch.dst]).unique()
+    n_id, edge_index, e_id, num_seed_edges = model.neighborhood(seeds)
+    per_target = torch.bincount(edge_index[1, num_seed_edges:], minlength=n_id.numel())
+    assert per_target.max() <= 2
+    assert torch.bincount(edge_index[1, :num_seed_edges]).max() > 2
+    # ...and they are each account's most recent ones.
+    ring = n_id[edge_index[1, num_seed_edges]]
+    newest = model.neighbors.e_id[ring].max()
+    assert newest in e_id[num_seed_edges:][edge_index[1, num_seed_edges:] == edge_index[1, num_seed_edges]]
+
+
 def test_time_encoder_starts_with_geometric_frequencies():
     encoder = TimeEncoder(10)
     frequencies = encoder.lin.weight.view(-1)

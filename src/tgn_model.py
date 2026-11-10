@@ -58,7 +58,7 @@ from evaluation import (
 # Settings that must not change between a run and its --resume.
 RESUME_LOCKED = (
     "data", "max_events", "train_frac", "val_frac",
-    "memory_dim", "time_dim", "embedding_dim", "neighbor_size", "layers",
+    "memory_dim", "time_dim", "embedding_dim", "neighbor_size", "layers", "hop2_size",
     "no_txn_features", "no_activity_features", "activity_in_attention",
     "batch_size", "lr", "pos_weight", "max_grad_norm", "seed",
 )
@@ -307,14 +307,24 @@ class GraphAttentionEmbedding(torch.nn.Module):
         edge_index: Tensor,
         t: Tensor,
         msg: Tensor,
+        num_seed_edges: int | None = None,
     ) -> Tensor:
+        """
+        The first num_seed_edges edges are the ones into the accounts whose
+        embedding is wanted. The last layer only runs on those: the other
+        edges cannot change the embeddings that are read, so skipping them
+        gives the same result for a fraction of the work.
+        """
         rel_t = last_update[edge_index[0]] - t
         rel_t_enc = self.time_enc(rel_t.to(x.dtype))
         edge_attr = torch.cat([rel_t_enc, msg], dim=-1)
         for layer, conv in enumerate(self.convs):
             if layer > 0:
                 x = x.relu()
-            x = conv(x, edge_index, edge_attr)
+            if layer == len(self.convs) - 1 and num_seed_edges is not None:
+                x = conv(x, edge_index[:, :num_seed_edges], edge_attr[:num_seed_edges])
+            else:
+                x = conv(x, edge_index, edge_attr)
         return x
 
 
@@ -371,8 +381,13 @@ class TGN(torch.nn.Module):
         num_layers: int = 1,
         use_activity_features: bool = True,
         activity_in_attention: bool = False,
+        hop2_size: int | None = None,
     ):
         super().__init__()
+        if num_layers not in (1, 2):
+            raise ValueError("num_layers must be 1 or 2")
+        self.neighbor_size = neighbor_size
+        self.hop2_size = min(hop2_size or neighbor_size, neighbor_size)
         msg_dim = encoder.out_channels
         self.encoder = encoder
         self.use_txn_features = use_txn_features
@@ -399,6 +414,7 @@ class TGN(torch.nn.Module):
         self.classifier = TransactionClassifier(embedding_dim, extra)
 
         self.register_buffer("assoc", torch.empty(num_nodes, dtype=torch.long), persistent=False)
+        self.register_buffer("is_seed", torch.zeros(num_nodes, dtype=torch.bool), persistent=False)
         self.to(device)
         # Not a module: it keeps its tensors on the device it is created with.
         self.neighbors = LastNeighborLoader(num_nodes, size=neighbor_size, device=device)
@@ -465,6 +481,40 @@ class TGN(torch.nn.Module):
         ], dim=-1)
         return torch.log1p(counts.to(torch.float32))
 
+    def recent_edges(self, accounts: Tensor, size: int) -> tuple[Tensor, Tensor, Tensor]:
+        """
+        The `size` most recent transactions of each account, as edges from
+        the counterparty to the account: (counterparty, account, transaction id).
+        """
+        e_id = self.neighbors.e_id[accounts, :size]             # most recent first; -1 = empty slot
+        counterparty = self.neighbors.neighbors[accounts, :size]
+        filled = e_id >= 0
+        return counterparty[filled], accounts.unsqueeze(-1).expand_as(e_id)[filled], e_id[filled]
+
+    def neighborhood(self, seeds: Tensor) -> tuple[Tensor, Tensor, Tensor, int]:
+        """
+        What the attention layers need for the given accounts: their recent
+        transactions and, with a second layer, the recent transactions of the
+        accounts those involve. Returns the accounts involved, the edges
+        (indexing into them), the transaction ids, and how many of the edges,
+        the first ones, lead into the seeds themselves.
+        """
+        source, target, e_id = self.recent_edges(seeds, self.neighbor_size)
+        num_seed_edges = e_id.numel()
+        if self.num_layers == 2:
+            self.is_seed[seeds] = True
+            ring = source.unique()
+            ring = ring[~self.is_seed[ring]]                     # one hop out, not seeds themselves
+            self.is_seed[seeds] = False
+            ring_source, ring_target, ring_e_id = self.recent_edges(ring, self.hop2_size)
+            source = torch.cat([source, ring_source])
+            target = torch.cat([target, ring_target])
+            e_id = torch.cat([e_id, ring_e_id])
+
+        n_id = torch.cat([seeds, source]).unique()
+        self.assoc[n_id] = torch.arange(n_id.numel(), device=n_id.device)
+        return n_id, torch.stack([self.assoc[source], self.assoc[target]]), e_id, num_seed_edges
+
     def forward(self, batch: Batch, events: Events) -> tuple[Tensor, Tensor]:
         """
         Laundering logits for a batch, computed from the state as it was
@@ -473,13 +523,9 @@ class TGN(torch.nn.Module):
         """
         msg = self.encoder(batch)
 
-        # The batch's accounts and their recent transactions; with a second
-        # layer, also the recent transactions of the accounts those involve.
-        n_id, edge_index, e_id = self.neighbors(torch.cat([batch.src, batch.dst]).unique())
-        for _ in range(self.num_layers - 1):
-            n_id, edge_index, e_id = self.neighbors(n_id)
-        self.assoc[n_id] = torch.arange(n_id.size(0), device=n_id.device)
-
+        n_id, edge_index, e_id, num_seed_edges = self.neighborhood(
+            torch.cat([batch.src, batch.dst]).unique()
+        )
         memory, last_update = self.memory(n_id)
         past = events.rows(e_id, n_id.device)
         # Each past transaction is attended to by one of its two accounts:
@@ -490,7 +536,7 @@ class TGN(torch.nn.Module):
             # Every account's statistics as they stand at the end of the batch's time span.
             x = torch.cat([memory, self.activity(n_id, batch.t.max().expand(n_id.numel()))], dim=-1)
         z = self.gnn(x, last_update, edge_index, past.t,
-                     torch.cat([self.encoder(past), was_payer], dim=-1))
+                     torch.cat([self.encoder(past), was_payer], dim=-1), num_seed_edges)
 
         src, dst = self.assoc[batch.src], self.assoc[batch.dst]
         extra = []
@@ -669,8 +715,11 @@ def get_args(argv: list | None = None) -> argparse.Namespace:
     g.add_argument("--time_dim", type=int, default=128)
     g.add_argument("--embedding_dim", type=int, default=128)
     g.add_argument("--neighbor_size", type=int, default=10)
-    g.add_argument("--layers", type=int, default=1,
+    g.add_argument("--layers", type=int, default=1, choices=(1, 2),
                    help="Attention layers: with 2, an account also sees its neighbours' neighbours")
+    g.add_argument("--hop2_size", type=int, default=None,
+                   help="With 2 layers: recent transactions looked at for each neighbour "
+                        "(default: --neighbor_size)")
     g.add_argument("--no_txn_features", action="store_true",
                    help="Ablation: the classifier does not see the transaction's own attributes")
     g.add_argument("--no_activity_features", action="store_true",
@@ -779,6 +828,7 @@ def main(argv: list | None = None) -> dict:
         num_layers=args.layers,
         use_activity_features=not args.no_activity_features,
         activity_in_attention=args.activity_in_attention,
+        hop2_size=args.hop2_size,
     )
     # `stream` is what the model reads; `events` stays on the CPU for the metrics.
     stream = place_events(events, device)
