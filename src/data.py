@@ -24,7 +24,7 @@ import torch.nn.functional as F
 DEFAULT_TRANS_PATH = os.path.join("data", "raw", "HI-Small_Trans.csv")
 
 # Bump when the cached arrays change meaning, so stale caches are re-parsed.
-CACHE_VERSION = 2
+CACHE_VERSION = 3
 
 COLUMNS = [
     "timestamp", "from_bank", "from_account", "to_bank", "to_account",
@@ -52,7 +52,8 @@ class Batch(NamedTuple):
     dst: torch.Tensor      # [B]    receiving account
     t: torch.Tensor        # [B]    seconds since the Unix epoch
     amount: torch.Tensor   # [B, 2] log1p(amount paid), log1p(amount received)
-    cat: torch.Tensor      # [B, 3] payment currency, receiving currency, payment format
+    cat: torch.Tensor      # [B, 4] payment currency, receiving currency, payment format,
+                           #        both accounts at the same bank
     y: torch.Tensor        # [B]    1 = laundering
 
 
@@ -111,6 +112,7 @@ class TransactionEncoder(torch.nn.Module):
       one-hot payment format                             formats
       paid and received in different currencies          1
       account pays itself                                1
+      both accounts at the same bank                     1
       time of day (sin, cos)                             2
 
     It has no trainable parameters. The amount statistics come from the
@@ -127,7 +129,7 @@ class TransactionEncoder(torch.nn.Module):
         super().__init__()
         self.num_currencies = num_currencies
         self.num_formats = num_formats
-        self.out_channels = 2 + 2 * num_currencies + num_formats + 4
+        self.out_channels = 2 + 2 * num_currencies + num_formats + 5
         self.register_buffer("amount_mean", amount_mean.clone())
         self.register_buffer("amount_std", amount_std.clone())
 
@@ -151,6 +153,7 @@ class TransactionEncoder(torch.nn.Module):
             F.one_hot(fmt, self.num_formats).to(dtype),
             (paid_in != received_in).to(dtype).unsqueeze(-1),
             (batch.src == batch.dst).to(dtype).unsqueeze(-1),
+            cat[:, 3].to(dtype).unsqueeze(-1),
             torch.sin(time_of_day).unsqueeze(-1),
             torch.cos(time_of_day).unsqueeze(-1),
         ], dim=-1)
@@ -231,7 +234,8 @@ def _parse_csv(path: str, chunksize: int, log: Callable[[str], None]) -> dict:
         parts["amount"].append(np.log1p(np.stack([
             chunk["amount_paid"].to_numpy(), chunk["amount_received"].to_numpy(),
         ], axis=1)).astype(np.float32))
-        parts["cat"].append(np.column_stack([currency, fmt]).astype(np.uint8))
+        same_bank = (from_bank == to_bank).to_numpy(dtype=bool)
+        parts["cat"].append(np.column_stack([currency, fmt, same_bank]).astype(np.uint8))
         parts["y"].append(chunk["is_laundering"].to_numpy().astype(np.uint8))
 
         rows += n
@@ -248,7 +252,7 @@ def _parse_csv(path: str, chunksize: int, log: Callable[[str], None]) -> dict:
     format_names, format_map = _alphabetical(formats)
     cat = arrays["cat"]
     arrays["cat"] = np.stack([
-        currency_map[cat[:, 0]], currency_map[cat[:, 1]], format_map[cat[:, 2]],
+        currency_map[cat[:, 0]], currency_map[cat[:, 1]], format_map[cat[:, 2]], cat[:, 3],
     ], axis=1).astype(np.uint8)
 
     # Stable sort: transactions sharing a timestamp keep their file order.

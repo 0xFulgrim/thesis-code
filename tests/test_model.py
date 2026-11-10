@@ -1,8 +1,12 @@
+import math
+
+import pytest
 import torch
 
 from data import Events, TransactionEncoder, load_events
 from tgn_model import (
     TGN,
+    AccountActivity,
     StreamMemory,
     TimeEncoder,
     recency,
@@ -12,13 +16,31 @@ from tgn_model import (
 )
 
 
-def small_model(events: Events, use_txn_features: bool = True) -> TGN:
+def small_model(
+    events: Events,
+    use_txn_features: bool = True,
+    num_layers: int = 1,
+    use_activity_features: bool = True,
+) -> TGN:
     set_seed(0)
     return TGN(
         num_nodes=events.num_nodes,
         encoder=TransactionEncoder.fit(events, events.num_events),
         memory_dim=16, time_dim=8, embedding_dim=16, neighbor_size=5,
-        use_txn_features=use_txn_features, device=torch.device("cpu"),
+        use_txn_features=use_txn_features, device=torch.device("cpu"), num_layers=num_layers,
+        use_activity_features=use_activity_features,
+    )
+
+
+def tiny_stream(pairs: list) -> Events:
+    """A hand-written stream: one transaction per (payer, receiver) pair, a minute apart."""
+    n = len(pairs)
+    src = torch.tensor([a for a, _ in pairs])
+    dst = torch.tensor([b for _, b in pairs])
+    return Events(
+        src, dst, 1_662_000_000 + 60 * torch.arange(n), torch.rand(n, 2) + 1,
+        torch.zeros(n, 4, dtype=torch.uint8), torch.zeros(n, dtype=torch.uint8),
+        num_nodes=int(max(src.max(), dst.max())) + 1, currencies=["A"], formats=["X"],
     )
 
 
@@ -69,6 +91,84 @@ def test_memory_matches_a_per_account_reference():
             ref_pending[int(src[j])] = (int(dst[j]), int(t[j]), msg[j], True)
 
 
+def test_activity_matches_a_per_account_reference():
+    generator = torch.Generator().manual_seed(0)
+    n_nodes = 10
+    activity = AccountActivity(n_nodes)
+    # role 0 = as payer, 1 = as receiver
+    ref = {n: {"count": [0, 0], "amount": [0.0, 0.0], "events": [], "first": 0} for n in range(n_nodes)}
+
+    def expected(node, t):
+        r = ref[node]
+        recent = [
+            sum(0.5 ** ((t - at) / half_life) for at, role in r["events"] if role == wanted)
+            for wanted in (0, 1) for half_life in AccountActivity.HALF_LIVES
+        ]
+        age = t - r["first"] if r["first"] else 0
+        return torch.tensor(
+            [math.log1p(c) / 5 for c in r["count"]]
+            + [math.log1p(x) / 5 for x in recent]
+            + [r["amount"][role] / max(r["count"][role], 1) for role in (0, 1)]
+            + [math.log1p(age) / 10]
+        )
+
+    now = 1_662_000_000
+    for _ in range(30):
+        b = int(torch.randint(1, 9, (1,), generator=generator))
+        src = torch.randint(0, n_nodes, (b,), generator=generator)
+        dst = torch.randint(0, n_nodes, (b,), generator=generator)
+        t = now + torch.randint(0, 4000, (b,), generator=generator).cumsum(0)
+        now = int(t[-1])
+        msg = torch.randn(b, 4, generator=generator)
+
+        read_at = now + 500              # the batch above is not counted yet
+        got = activity(torch.arange(n_nodes), torch.full((n_nodes,), read_at))
+        for node in range(n_nodes):
+            assert torch.allclose(got[node], expected(node, read_at), atol=1e-4), node
+
+        activity.update_state(src, dst, t, msg)
+        for j in range(b):
+            for node, role in ((int(src[j]), 0), (int(dst[j]), 1)):
+                r = ref[node]
+                r["count"][role] += 1
+                r["amount"][role] += float(msg[j, role])
+                r["events"].append((int(t[j]), role))
+                r["first"] = r["first"] or int(t[j])
+
+
+def test_pair_history_counts_earlier_payments_each_way():
+    events = tiny_stream([(0, 1), (0, 1), (1, 0), (2, 1), (0, 1), (1, 0), (2, 0)])
+    model = small_model(events)
+    past = events.rows(slice(0, 4), model.device)
+    model.update_state(past, model.encoder(past))
+
+    queries = events.rows(slice(4, 7), model.device)       # 0 pays 1, 1 pays 0, 2 pays 0
+    counts = torch.expm1(model.pair_history(queries, events)).round().tolist()
+    assert counts == [[2.0, 1.0], [1.0, 2.0], [0.0, 0.0]]
+
+
+def test_attention_is_told_which_way_the_money_went():
+    # Same accounts, same times and amounts; only the direction of the first
+    # payment differs. The score of the second transaction must notice.
+    one_way = tiny_stream([(0, 1), (2, 1)])
+    other_way = tiny_stream([(1, 0), (2, 1)])
+    other_way.amount.copy_(one_way.amount)
+    # The classifier sees the two embeddings only.
+    model = small_model(one_way, use_txn_features=False, use_activity_features=False)
+
+    def score_of_second(stream):
+        model.reset_state()
+        model.eval()
+        with torch.no_grad():
+            first = stream.rows(slice(0, 1), model.device)
+            model.update_state(first, model.encoder(first))
+            # Hide the direction from the memory, so only the edge feature can carry it.
+            model.memory.pending_paid.zero_()
+            return model(stream.rows(slice(1, 2), model.device), stream)[0]
+
+    assert not torch.allclose(score_of_second(one_way), score_of_second(other_way))
+
+
 def test_time_encoder_starts_with_geometric_frequencies():
     encoder = TimeEncoder(10)
     frequencies = encoder.lin.weight.view(-1)
@@ -76,9 +176,10 @@ def test_time_encoder_starts_with_geometric_frequencies():
     assert torch.allclose(encoder(torch.tensor([0])), torch.ones(1, 10))
 
 
-def test_gradients_reach_every_part(csv_path):
+@pytest.mark.parametrize("num_layers", [1, 2])
+def test_gradients_reach_every_part(csv_path, num_layers):
     events = load_events(csv_path, use_cache=False, log=lambda _m: None)
-    model = small_model(events)
+    model = small_model(events, num_layers=num_layers)
     model.train()
     for lo in (0, 50, 100):                       # let some state build up first
         batch = events.rows(slice(lo, lo + 50), model.device)
@@ -124,9 +225,10 @@ def test_recency():
     assert torch.isclose(features[2, 0], torch.log1p(torch.tensor(100.0)) / 10)
 
 
-def test_scores_do_not_depend_on_later_transactions(csv_path):
+@pytest.mark.parametrize("num_layers", [1, 2])
+def test_scores_do_not_depend_on_later_transactions(csv_path, num_layers):
     events = load_events(csv_path, use_cache=False, log=lambda _m: None)
-    model = small_model(events)
+    model = small_model(events, num_layers=num_layers)
     batch_size, cut, end = 50, 600, 900
 
     def scores(stream: Events):

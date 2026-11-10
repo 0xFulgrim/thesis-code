@@ -43,6 +43,8 @@ def test_load_matches_the_csv(transactions, csv_path):
     paid_in = np.array(events.currencies)[events.cat[:, 0].numpy()]
     received_in = np.array(events.currencies)[events.cat[:, 1].numpy()]
     fmt = np.array(events.formats)[events.cat[:, 2].numpy()]
+    assert np.array_equal(events.cat[:, 3].numpy().astype(bool),
+                          (frame["from_bank"] == frame["to_bank"]).to_numpy())
     assert np.array_equal(paid_in, frame["payment_currency"].to_numpy())
     assert np.array_equal(received_in, frame["receiving_currency"].to_numpy())
     assert np.array_equal(fmt, frame["payment_format"].to_numpy())
@@ -124,14 +126,14 @@ def test_to_device_keeps_the_stream(csv_path):
     assert (moved.num_nodes, moved.currencies, moved.formats) == \
            (events.num_nodes, events.currencies, events.formats)
     n = events.num_events
-    assert events.nbytes == n * (8 + 8 + 8 + 2 * 4 + 3 + 1)
+    assert events.nbytes == n * (8 + 8 + 8 + 2 * 4 + 4 + 1)
 
 
 def test_encoder_layout(csv_path):
     events = load_events(csv_path, use_cache=False, log=quiet)
     encoder = TransactionEncoder.fit(events, train_end=events.num_events)
     n_cur, n_fmt = len(events.currencies), len(events.formats)
-    assert encoder.out_channels == 2 + 2 * n_cur + n_fmt + 4
+    assert encoder.out_channels == 2 + 2 * n_cur + n_fmt + 5
 
     batch = events.rows(slice(0, 500), torch.device("cpu"))
     x = encoder(batch)
@@ -148,7 +150,8 @@ def test_encoder_layout(csv_path):
     flags = x[:, 2 + 2 * n_cur + n_fmt:]
     assert torch.equal(flags[:, 0], (batch.cat[:, 0] != batch.cat[:, 1]).float())
     assert torch.equal(flags[:, 1], (batch.src == batch.dst).float())
-    assert torch.allclose(flags[:, 2] ** 2 + flags[:, 3] ** 2, torch.ones(500), atol=1e-5)
+    assert torch.equal(flags[:, 2], batch.cat[:, 3].float())
+    assert torch.allclose(flags[:, 3] ** 2 + flags[:, 4] ** 2, torch.ones(500), atol=1e-5)
 
     # Amounts are standardised with the statistics of the fitted range.
     full = encoder(events.rows(slice(0, events.num_events), torch.device("cpu")))

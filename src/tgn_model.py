@@ -58,7 +58,8 @@ from evaluation import (
 # Settings that must not change between a run and its --resume.
 RESUME_LOCKED = (
     "data", "max_events", "train_frac", "val_frac",
-    "memory_dim", "time_dim", "embedding_dim", "neighbor_size", "no_txn_features",
+    "memory_dim", "time_dim", "embedding_dim", "neighbor_size", "layers",
+    "no_txn_features", "no_activity_features",
     "batch_size", "lr", "pos_weight", "max_grad_norm", "seed",
 )
 
@@ -195,10 +196,89 @@ class StreamMemory(torch.nn.Module):
         self.pending_paid[n_id] = paid
 
 
+class AccountActivity(torch.nn.Module):
+    """
+    Running activity statistics of every account, kept as the stream goes by:
+
+      payments made and received so far (log counts)                      2
+      the same, decayed with half-lives of an hour, a day and a week      6
+      mean standardised log amount paid and received                      2
+      time since the account was first seen (log)                         1
+
+    They give the classifier counts that the memory would otherwise have to
+    learn to keep. Like the memory, they only learn about a batch after it
+    was scored. No trainable parameters.
+    """
+
+    HALF_LIVES = (3_600.0, 86_400.0, 604_800.0)
+    out_channels = 11
+
+    def __init__(self, num_nodes: int):
+        super().__init__()
+        k = len(self.HALF_LIVES)
+        self.register_buffer("half_life", torch.tensor(self.HALF_LIVES))
+        # Index 0 of the second dimension: as payer. Index 1: as receiver.
+        self.register_buffer("count", torch.zeros(num_nodes, 2))
+        self.register_buffer("amount_sum", torch.zeros(num_nodes, 2))
+        self.register_buffer("recent", torch.zeros(num_nodes, 2, k))      # as of `recent_t`
+        self.register_buffer("recent_t", torch.zeros(num_nodes, dtype=torch.long))
+        self.register_buffer("first_seen", torch.zeros(num_nodes, dtype=torch.long))
+
+    def reset_state(self) -> None:
+        for buffer in (self.count, self.amount_sum, self.recent, self.recent_t, self.first_seen):
+            buffer.zero_()
+
+    def forward(self, node: Tensor, t: Tensor) -> Tensor:
+        """The statistics of `node` as they stand at time `t`."""
+        count = self.count[node]
+        elapsed = (t - self.recent_t[node]).clamp(min=0).to(count.dtype)
+        decay = torch.pow(0.5, elapsed.unsqueeze(-1) / self.half_life)
+        recent = self.recent[node] * decay.unsqueeze(1)
+        first_seen = self.first_seen[node]
+        age = (t - first_seen).clamp(min=0).to(count.dtype) * (first_seen > 0)
+        return torch.cat([
+            torch.log1p(count) / 5,
+            torch.log1p(recent).flatten(1) / 5,
+            self.amount_sum[node] / count.clamp(min=1),
+            torch.log1p(age).unsqueeze(-1) / 10,
+        ], dim=-1)
+
+    @torch.no_grad()
+    def update_state(self, src: Tensor, dst: Tensor, t: Tensor, msg: Tensor) -> None:
+        """Count a scored batch. msg[:, 0] and msg[:, 1] are the standardised log amounts."""
+        b, k = src.numel(), self.half_life.numel()
+        # Entry j is transaction j for its payer, entry b + j for its receiver.
+        node = torch.cat([src, dst])
+        role = (torch.arange(2 * b, device=src.device) >= b).long()
+        time = t.repeat(2)
+        n_id, inverse = node.unique(return_inverse=True)
+
+        self.count.view(-1).index_add_(0, node * 2 + role, torch.ones_like(time, dtype=self.count.dtype))
+        self.amount_sum.view(-1).index_add_(0, node * 2 + role, torch.cat([msg[:, 0], msg[:, 1]]))
+
+        # Bring each account's decayed counts forward to its latest transaction
+        # in the batch, then add the batch's transactions, decayed to that time.
+        latest = time.new_zeros(n_id.numel())
+        latest.scatter_reduce_(0, inverse, time, reduce="amax", include_self=True)
+        elapsed = (latest - self.recent_t[n_id]).clamp(min=0).to(self.recent.dtype)
+        carried = self.recent[n_id] * torch.pow(0.5, elapsed.unsqueeze(-1) / self.half_life).unsqueeze(1)
+        since = (latest[inverse] - time).to(self.recent.dtype)
+        added = self.recent.new_zeros(n_id.numel() * 2, k)
+        added.index_add_(0, inverse * 2 + role, torch.pow(0.5, since.unsqueeze(-1) / self.half_life))
+        self.recent[n_id] = carried + added.view(-1, 2, k)
+        self.recent_t[n_id] = latest
+
+        earliest = time.new_full((n_id.numel(),), torch.iinfo(torch.long).max)
+        earliest.scatter_reduce_(0, inverse, time, reduce="amin", include_self=True)
+        new = self.first_seen[n_id] == 0
+        self.first_seen[n_id[new]] = earliest[new]
+
+
 class GraphAttentionEmbedding(torch.nn.Module):
     """
-    Computes node embeddings by attending over temporal neighbours.
-    Edge features = concat(time_encoding(rel_t), transaction features).
+    Computes node embeddings by attending over temporal neighbours, once per
+    layer. Edge features = concat(time_encoding(rel_t), transaction features).
+    With two layers an account also sees its neighbours' neighbours.
     """
 
     def __init__(
@@ -207,13 +287,17 @@ class GraphAttentionEmbedding(torch.nn.Module):
         out_channels: int,
         msg_dim: int,
         time_enc: torch.nn.Module,
+        num_layers: int = 1,
     ):
         super().__init__()
         self.time_enc = time_enc
         edge_dim = msg_dim + time_enc.out_channels
-        self.conv = TransformerConv(
-            in_channels, out_channels // 2,
-            heads=2, dropout=0.1, edge_dim=edge_dim,
+        self.convs = torch.nn.ModuleList(
+            TransformerConv(
+                in_channels if layer == 0 else out_channels, out_channels // 2,
+                heads=2, dropout=0.1, edge_dim=edge_dim,
+            )
+            for layer in range(num_layers)
         )
 
     def forward(
@@ -227,7 +311,11 @@ class GraphAttentionEmbedding(torch.nn.Module):
         rel_t = last_update[edge_index[0]] - t
         rel_t_enc = self.time_enc(rel_t.to(x.dtype))
         edge_attr = torch.cat([rel_t_enc, msg], dim=-1)
-        return self.conv(x, edge_index, edge_attr)
+        for layer, conv in enumerate(self.convs):
+            if layer > 0:
+                x = x.relu()
+            x = conv(x, edge_index, edge_attr)
+        return x
 
 
 class TransactionClassifier(torch.nn.Module):
@@ -280,22 +368,32 @@ class TGN(torch.nn.Module):
         neighbor_size: int,
         use_txn_features: bool,
         device: torch.device,
+        num_layers: int = 1,
+        use_activity_features: bool = True,
     ):
         super().__init__()
         msg_dim = encoder.out_channels
         self.encoder = encoder
         self.use_txn_features = use_txn_features
+        self.use_activity_features = use_activity_features
+        self.num_layers = num_layers
 
         self.memory = StreamMemory(num_nodes, msg_dim, memory_dim, time_dim)
+        self.activity = AccountActivity(num_nodes)
         # The time encoder is shared between the memory and the embedding.
+        # Past transactions carry one more feature there: which way the money went.
         self.gnn = GraphAttentionEmbedding(
             in_channels=memory_dim,
             out_channels=embedding_dim,
-            msg_dim=msg_dim,
+            msg_dim=msg_dim + 1,
             time_enc=self.memory.time_enc,
+            num_layers=num_layers,
         )
-        # Transaction features, plus two recency features for each account.
-        extra = msg_dim + 4 if use_txn_features else 0
+        extra = 0
+        if use_txn_features:
+            extra += msg_dim + 4          # the transaction, and two recency features per account
+        if use_activity_features:
+            extra += 2 * AccountActivity.out_channels + 2   # both accounts' activity, and their history together
         self.classifier = TransactionClassifier(embedding_dim, extra)
 
         self.register_buffer("assoc", torch.empty(num_nodes, dtype=torch.long), persistent=False)
@@ -309,9 +407,22 @@ class TGN(torch.nn.Module):
         return self.assoc.device
 
     def reset_state(self) -> None:
-        """Forget the stream: clear every account's memory and neighbours."""
+        """Forget the stream: clear every account's memory, statistics and neighbours."""
         self.memory.reset_state()
+        self.activity.reset_state()
         self.neighbors.reset_state()
+
+    def pair_history(self, batch: Batch, events: Events) -> Tensor:
+        """
+        How often, among the payer's most recent transactions, it paid this
+        receiver before, and how often the receiver paid it (log counts).
+        """
+        e_id = self.neighbors.e_id[batch.src]                  # [B, size], -1 = empty slot
+        with_receiver = (e_id >= 0) & (self.neighbors.neighbors[batch.src] == batch.dst.unsqueeze(-1))
+        payer = events.src[e_id.clamp(min=0).to(events.src.device)].to(batch.src.device)
+        paid = payer == batch.src.unsqueeze(-1)
+        counts = torch.stack([(with_receiver & paid).sum(-1), (with_receiver & ~paid).sum(-1)], dim=-1)
+        return torch.log1p(counts.to(torch.float32))
 
     def forward(self, batch: Batch, events: Events) -> tuple[Tensor, Tensor]:
         """
@@ -321,26 +432,37 @@ class TGN(torch.nn.Module):
         """
         msg = self.encoder(batch)
 
+        # The batch's accounts and their recent transactions; with a second
+        # layer, also the recent transactions of the accounts those involve.
         n_id, edge_index, e_id = self.neighbors(torch.cat([batch.src, batch.dst]).unique())
+        for _ in range(self.num_layers - 1):
+            n_id, edge_index, e_id = self.neighbors(n_id)
         self.assoc[n_id] = torch.arange(n_id.size(0), device=n_id.device)
 
         memory, last_update = self.memory(n_id)
         past = events.rows(e_id, n_id.device)
-        z = self.gnn(memory, last_update, edge_index, past.t, self.encoder(past))
+        # Each past transaction is attended to by one of its two accounts:
+        # tell the layer whether that account was the payer.
+        was_payer = (past.src == n_id[edge_index[1]]).to(msg.dtype).unsqueeze(-1)
+        z = self.gnn(memory, last_update, edge_index, past.t,
+                     torch.cat([self.encoder(past), was_payer], dim=-1))
 
         src, dst = self.assoc[batch.src], self.assoc[batch.dst]
-        extra = None
+        extra = []
         if self.use_txn_features:
-            extra = torch.cat([
-                msg,
-                recency(batch.t, last_update[src]),
-                recency(batch.t, last_update[dst]),
-            ], dim=-1)
-        return self.classifier(z[src], z[dst], extra), msg
+            extra += [msg, recency(batch.t, last_update[src]), recency(batch.t, last_update[dst])]
+        if self.use_activity_features:
+            extra += [
+                self.activity(batch.src, batch.t),
+                self.activity(batch.dst, batch.t),
+                self.pair_history(batch, events),
+            ]
+        return self.classifier(z[src], z[dst], torch.cat(extra, dim=-1) if extra else None), msg
 
     def update_state(self, batch: Batch, msg: Tensor) -> None:
-        """Let the batch's transactions into the memory and the neighbour lists."""
+        """Let the batch's transactions into the memory, the statistics and the neighbour lists."""
         self.memory.update_state(batch.src, batch.dst, batch.t, msg)
+        self.activity.update_state(batch.src, batch.dst, batch.t, msg)
         self.neighbors.insert(batch.src, batch.dst)
 
 
@@ -502,8 +624,12 @@ def get_args(argv: list | None = None) -> argparse.Namespace:
     g.add_argument("--time_dim", type=int, default=128)
     g.add_argument("--embedding_dim", type=int, default=128)
     g.add_argument("--neighbor_size", type=int, default=10)
+    g.add_argument("--layers", type=int, default=1,
+                   help="Attention layers: with 2, an account also sees its neighbours' neighbours")
     g.add_argument("--no_txn_features", action="store_true",
-                   help="Ablation: classify from the two account embeddings alone")
+                   help="Ablation: the classifier does not see the transaction's own attributes")
+    g.add_argument("--no_activity_features", action="store_true",
+                   help="Ablation: the classifier does not see account activity statistics")
 
     g = p.add_argument_group("training")
     g.add_argument("--epochs", type=int, default=30)
@@ -600,6 +726,8 @@ def main(argv: list | None = None) -> dict:
         neighbor_size=args.neighbor_size,
         use_txn_features=not args.no_txn_features,
         device=device,
+        num_layers=args.layers,
+        use_activity_features=not args.no_activity_features,
     )
     # `stream` is what the model reads; `events` stays on the CPU for the metrics.
     stream = place_events(events, device)
