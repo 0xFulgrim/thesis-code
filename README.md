@@ -199,6 +199,26 @@ entirely different accounts, and look like ordinary payments; the model
 catches about 1% of them. They are 28% of the laundering in the test split,
 which caps recall at about 0.72.
 
+Of the laundering that does belong to a scheme, one run of the model catches
+84% in the test split (`src/scheme_report.py`):
+
+| Scheme | Laundering transactions | Caught |
+|---|---|---|
+| Gather-scatter | 449 | 93% |
+| Scatter-gather | 328 | 92% |
+| Fan-in | 166 | 88% |
+| Fan-out | 170 | 86% |
+| Random | 104 | 75% |
+| Cycle | 147 | 73% |
+| Stack | 219 | 70% |
+| Bipartite | 97 | 60% |
+| No listed scheme | 641 | 1% |
+
+It catches 72% of the transactions that open a scheme, 88% of those from the
+sixth onwards, and at least one transaction in 219 of the 226 schemes that
+reach into the test split. Every transaction it flags was paid by ACH, the
+format of all scheme laundering.
+
 ## Speed
 
 Measured on one NVIDIA H100, alone on the GPU, in the middle of the HI-Small
