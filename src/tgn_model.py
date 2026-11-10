@@ -147,30 +147,39 @@ class StreamMemory(torch.nn.Module):
     def forward(self, n_id: Tensor) -> tuple[Tensor, Tensor]:
         """Memory and time of the latest transaction of the given accounts."""
         memory = self.memory[n_id]
-        last_update = self.last_update[n_id]
-
+        previous = self.last_update[n_id]
         has_pending = self.pending[n_id]
-        node = n_id[has_pending]
-        if node.numel() > 0:
-            t = self.pending_t[node]
-            previous = self.last_update[node]
-            # An account's first transaction has no previous one: use a gap of 0.
-            gap = torch.where(previous > 0, t - previous, torch.zeros_like(t))
-            message = torch.cat([
-                self.memory[node],
-                self.memory[self.pending_other[node]],
-                self.pending_msg[node],
-                self.pending_paid[node].to(memory.dtype).unsqueeze(-1),
-                self.time_enc(gap),
-            ], dim=-1)
-            memory[has_pending] = self.gru(message, self.memory[node])
-            last_update[has_pending] = t
-        return memory, last_update
+        t = self.pending_t[n_id]
+
+        # Computed for every row and then selected with `where`, rather than
+        # for the pending rows only: selecting rows first would make the GPU
+        # report how many there are, a wait in every step, and nearly every
+        # account that has been seen has a pending message anyway.
+        # An account's first transaction has no previous one: use a gap of 0.
+        gap = torch.where(previous > 0, t - previous, torch.zeros_like(t))
+        message = torch.cat([
+            memory,
+            self.memory[self.pending_other[n_id]],
+            self.pending_msg[n_id],
+            self.pending_paid[n_id].to(memory.dtype).unsqueeze(-1),
+            self.time_enc(gap),
+        ], dim=-1)
+        updated = self.gru(message, memory)
+        return (
+            torch.where(has_pending.unsqueeze(-1), updated, memory),
+            torch.where(has_pending, t, previous),
+        )
 
     @torch.no_grad()
-    def update_state(self, src: Tensor, dst: Tensor, t: Tensor, msg: Tensor) -> None:
-        """Let a scored batch of transactions (in stream order) into the memory."""
-        n_id, inverse = torch.cat([src, dst]).unique(return_inverse=True)
+    def update_state(
+        self, src: Tensor, dst: Tensor, t: Tensor, msg: Tensor, accounts: tuple | None = None,
+    ) -> None:
+        """
+        Let a scored batch of transactions (in stream order) into the memory.
+        `accounts` may pass torch.cat([src, dst]).unique(return_inverse=True)
+        if the caller has it already.
+        """
+        n_id, inverse = accounts or torch.cat([src, dst]).unique(return_inverse=True)
 
         # Absorb what was pending for these accounts...
         memory, last_update = self(n_id)
@@ -244,14 +253,19 @@ class AccountActivity(torch.nn.Module):
         ], dim=-1)
 
     @torch.no_grad()
-    def update_state(self, src: Tensor, dst: Tensor, t: Tensor, msg: Tensor) -> None:
-        """Count a scored batch. msg[:, 0] and msg[:, 1] are the standardised log amounts."""
+    def update_state(
+        self, src: Tensor, dst: Tensor, t: Tensor, msg: Tensor, accounts: tuple | None = None,
+    ) -> None:
+        """
+        Count a scored batch. msg[:, 0] and msg[:, 1] are the standardised log
+        amounts. `accounts` may pass torch.cat([src, dst]).unique(return_inverse=True).
+        """
         b, k = src.numel(), self.half_life.numel()
         # Entry j is transaction j for its payer, entry b + j for its receiver.
         node = torch.cat([src, dst])
         role = (torch.arange(2 * b, device=src.device) >= b).long()
         time = t.repeat(2)
-        n_id, inverse = node.unique(return_inverse=True)
+        n_id, inverse = accounts or node.unique(return_inverse=True)
 
         self.count.view(-1).index_add_(0, node * 2 + role, torch.ones_like(time, dtype=self.count.dtype))
         self.amount_sum.view(-1).index_add_(0, node * 2 + role, torch.cat([msg[:, 0], msg[:, 1]]))
@@ -270,8 +284,8 @@ class AccountActivity(torch.nn.Module):
 
         earliest = time.new_full((n_id.numel(),), torch.iinfo(torch.long).max)
         earliest.scatter_reduce_(0, inverse, time, reduce="amin", include_self=True)
-        new = self.first_seen[n_id] == 0
-        self.first_seen[n_id[new]] = earliest[new]
+        first_seen = self.first_seen[n_id]
+        self.first_seen[n_id] = torch.where(first_seen == 0, earliest, first_seen)
 
 
 class GraphAttentionEmbedding(torch.nn.Module):
@@ -415,6 +429,7 @@ class TGN(torch.nn.Module):
 
         self.register_buffer("assoc", torch.empty(num_nodes, dtype=torch.long), persistent=False)
         self.register_buffer("is_seed", torch.zeros(num_nodes, dtype=torch.bool), persistent=False)
+        self._accounts_of: tuple = (None, None)
         self.to(device)
         # Not a module: it keeps its tensors on the device it is created with.
         self.neighbors = LastNeighborLoader(num_nodes, size=neighbor_size, device=device)
@@ -488,8 +503,8 @@ class TGN(torch.nn.Module):
         """
         e_id = self.neighbors.e_id[accounts, :size]             # most recent first; -1 = empty slot
         counterparty = self.neighbors.neighbors[accounts, :size]
-        filled = e_id >= 0
-        return counterparty[filled], accounts.unsqueeze(-1).expand_as(e_id)[filled], e_id[filled]
+        row, column = (e_id >= 0).nonzero(as_tuple=True)
+        return counterparty[row, column], accounts[row], e_id[row, column]
 
     def neighborhood(self, seeds: Tensor) -> tuple[Tensor, Tensor, Tensor, int]:
         """
@@ -523,9 +538,10 @@ class TGN(torch.nn.Module):
         """
         msg = self.encoder(batch)
 
-        n_id, edge_index, e_id, num_seed_edges = self.neighborhood(
-            torch.cat([batch.src, batch.dst]).unique()
-        )
+        both = torch.cat([batch.src, batch.dst])
+        accounts = both.unique(return_inverse=True)
+        self._accounts_of = (batch, accounts)        # update_state needs the same; see there
+        n_id, edge_index, e_id, num_seed_edges = self.neighborhood(accounts[0])
         memory, last_update = self.memory(n_id)
         past = events.rows(e_id, n_id.device)
         # Each past transaction is attended to by one of its two accounts:
@@ -538,22 +554,31 @@ class TGN(torch.nn.Module):
         z = self.gnn(x, last_update, edge_index, past.t,
                      torch.cat([self.encoder(past), was_payer], dim=-1), num_seed_edges)
 
-        src, dst = self.assoc[batch.src], self.assoc[batch.dst]
+        # Payer and receiver are handled together (rows 0..B-1 and B..2B-1)
+        # and split afterwards: half as many operations per step.
+        b = batch.src.numel()
+        rows = self.assoc[both]
+        z = z[rows]
+        time = batch.t.repeat(2)
         extra = []
         if self.use_txn_features:
-            extra += [msg, recency(batch.t, last_update[src]), recency(batch.t, last_update[dst])]
+            seen = recency(time, last_update[rows])
+            extra += [msg, seen[:b], seen[b:]]
         if self.use_activity_features:
-            extra += [
-                self.activity(batch.src, batch.t),
-                self.activity(batch.dst, batch.t),
-                self.local_structure(batch, events),
-            ]
-        return self.classifier(z[src], z[dst], torch.cat(extra, dim=-1) if extra else None), msg
+            activity = self.activity(both, time)
+            extra += [activity[:b], activity[b:], self.local_structure(batch, events)]
+        return self.classifier(z[:b], z[b:], torch.cat(extra, dim=-1) if extra else None), msg
 
     def update_state(self, batch: Batch, msg: Tensor) -> None:
         """Let the batch's transactions into the memory, the statistics and the neighbour lists."""
-        self.memory.update_state(batch.src, batch.dst, batch.t, msg)
-        self.activity.update_state(batch.src, batch.dst, batch.t, msg)
+        # forward() already found the batch's distinct accounts; reuse them if
+        # this is the batch it was called with.
+        cached_batch, accounts = self._accounts_of
+        if cached_batch is not batch:
+            accounts = None
+        self._accounts_of = (None, None)
+        self.memory.update_state(batch.src, batch.dst, batch.t, msg, accounts)
+        self.activity.update_state(batch.src, batch.dst, batch.t, msg, accounts)
         self.neighbors.insert(batch.src, batch.dst)
 
 

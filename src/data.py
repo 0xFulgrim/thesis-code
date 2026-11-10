@@ -133,6 +133,21 @@ class TransactionEncoder(torch.nn.Module):
         self.register_buffer("amount_mean", amount_mean.clone())
         self.register_buffer("amount_std", amount_std.clone())
 
+        # The one-hot blocks and the cross-currency flag depend only on the
+        # three codes, so every combination is laid out once and looked up:
+        # one operation per call where there were a dozen.
+        paid_in, received_in, fmt = torch.meshgrid(
+            torch.arange(num_currencies), torch.arange(num_currencies), torch.arange(num_formats),
+            indexing="ij",
+        )
+        paid_in, received_in, fmt = paid_in.reshape(-1), received_in.reshape(-1), fmt.reshape(-1)
+        self.register_buffer("categorical", torch.cat([
+            F.one_hot(paid_in, num_currencies),
+            F.one_hot(received_in, num_currencies),
+            F.one_hot(fmt, num_formats),
+            (paid_in != received_in).unsqueeze(-1),
+        ], dim=-1).to(amount_mean.dtype), persistent=False)
+
     @classmethod
     def fit(cls, events: Events, train_end: int) -> TransactionEncoder:
         amount = events.amount[:train_end]
@@ -144,14 +159,11 @@ class TransactionEncoder(torch.nn.Module):
     def forward(self, batch: Batch) -> torch.Tensor:
         dtype = batch.amount.dtype
         cat = batch.cat.long()
-        paid_in, received_in, fmt = cat[:, 0], cat[:, 1], cat[:, 2]
+        combination = (cat[:, 0] * self.num_currencies + cat[:, 1]) * self.num_formats + cat[:, 2]
         time_of_day = (batch.t % SECONDS_PER_DAY).to(dtype) * (2 * math.pi / SECONDS_PER_DAY)
         return torch.cat([
             (batch.amount - self.amount_mean) / self.amount_std,
-            F.one_hot(paid_in, self.num_currencies).to(dtype),
-            F.one_hot(received_in, self.num_currencies).to(dtype),
-            F.one_hot(fmt, self.num_formats).to(dtype),
-            (paid_in != received_in).to(dtype).unsqueeze(-1),
+            self.categorical[combination],
             (batch.src == batch.dst).to(dtype).unsqueeze(-1),
             cat[:, 3].to(dtype).unsqueeze(-1),
             torch.sin(time_of_day).unsqueeze(-1),
