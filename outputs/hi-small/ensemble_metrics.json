@@ -1,0 +1,65 @@
+{
+  "runs": [
+    "outputs/final/small_seed42",
+    "outputs/final/small_seed1",
+    "outputs/final/small_seed2",
+    "outputs/final/small_seed3",
+    "outputs/final/small_seed4"
+  ],
+  "validation": {
+    "auc_roc": 0.9883487391125914,
+    "avg_precision": 0.6308658728716908,
+    "threshold": 0.2390070553978199,
+    "f1": 0.6631243358129648,
+    "precision": 0.814621409921671,
+    "recall": 0.5591397849462365,
+    "tp": 312,
+    "fp": 71,
+    "fn": 246,
+    "tn": 507205
+  },
+  "test": {
+    "auc_roc": 0.9906487899440896,
+    "avg_precision": 0.6877127095174655,
+    "threshold": 0.2390070553978199,
+    "f1": 0.6782022471910113,
+    "precision": 0.7087834664161579,
+    "recall": 0.6501507970702284,
+    "tp": 1509,
+    "fp": 620,
+    "fn": 812,
+    "tn": 1520563
+  },
+  "detection_latency": {
+    "mule_accounts": 2844,
+    "detected_accounts": 1606,
+    "detection_rate": 0.5646976090014064,
+    "mean_latency_seconds": 5413.935242839352,
+    "median_latency_seconds": 0.0,
+    "p90_latency_seconds": 0.0,
+    "zero_latency_accounts": 1520,
+    "flagged_before_onset": 8
+  },
+  "test_active_days": {
+    "auc_roc": 0.9871031559533521,
+    "avg_precision": 0.5731917364614608,
+    "threshold": 0.2390070553978199,
+    "f1": 0.5758730158730159,
+    "precision": 0.6111859838274932,
+    "recall": 0.5444177671068428,
+    "tp": 907,
+    "fp": 577,
+    "fn": 759,
+    "tn": 1520153
+  },
+  "detection_latency_active_days": {
+    "mule_accounts": 2332,
+    "detected_accounts": 1117,
+    "detection_rate": 0.47898799313893653,
+    "mean_latency_seconds": 3983.8495971351836,
+    "median_latency_seconds": 0.0,
+    "p90_latency_seconds": 0.0,
+    "zero_latency_accounts": 1060,
+    "flagged_before_onset": 5
+  }
+}

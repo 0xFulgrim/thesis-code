@@ -1,0 +1,196 @@
+{
+  "data": {
+    "file": "data/raw/HI-Large_Trans.csv",
+    "accounts": 2116168,
+    "transactions": 179702229,
+    "laundering": 225546,
+    "splits": {
+      "train": {
+        "transactions": 107821337,
+        "laundering": 108032
+      },
+      "validation": {
+        "transactions": 17970223,
+        "laundering": 20121
+      },
+      "test": {
+        "transactions": 53910669,
+        "laundering": 97393
+      }
+    },
+    "quiet_days_in_test": {
+      "transactions": 40719,
+      "laundering": 24273
+    }
+  },
+  "best_epoch": 6,
+  "validation": {
+    "auc_roc": 0.9892225089118842,
+    "avg_precision": 0.5742198553519524,
+    "threshold": 0.7652479324436194,
+    "f1": 0.6160159314465029,
+    "precision": 0.7839643652561247,
+    "recall": 0.5073306495701009,
+    "tp": 10208,
+    "fp": 2813,
+    "fn": 9913,
+    "tn": 17947289
+  },
+  "test": {
+    "auc_roc": 0.9923218197258912,
+    "avg_precision": 0.7079355246824948,
+    "threshold": 0.7652479324436194,
+    "f1": 0.7179458692096412,
+    "precision": 0.899987620315063,
+    "recall": 0.5971579066257329,
+    "tp": 58159,
+    "fp": 6463,
+    "fn": 39234,
+    "tn": 53806813
+  },
+  "detection_latency": {
+    "mule_accounts": 107985,
+    "detected_accounts": 56209,
+    "detection_rate": 0.52052599898134,
+    "mean_latency_seconds": 92818.81513636606,
+    "median_latency_seconds": 0.0,
+    "p90_latency_seconds": 0.0,
+    "zero_latency_accounts": 51538,
+    "flagged_before_onset": 478
+  },
+  "test_active_days": {
+    "auc_roc": 0.9898294171623303,
+    "avg_precision": 0.6053072940401966,
+    "threshold": 0.7652479324436194,
+    "f1": 0.6402693392878781,
+    "precision": 0.8719296591391259,
+    "recall": 0.5058670678336981,
+    "tp": 36989,
+    "fp": 5433,
+    "fn": 36131,
+    "tn": 53791397
+  },
+  "detection_latency_active_days": {
+    "mule_accounts": 91645,
+    "detected_accounts": 40330,
+    "detection_rate": 0.4400676523541928,
+    "mean_latency_seconds": 46282.991321596826,
+    "median_latency_seconds": 0.0,
+    "p90_latency_seconds": 0.0,
+    "zero_latency_accounts": 37501,
+    "flagged_before_onset": 286
+  },
+  "history": [
+    {
+      "epoch": 1,
+      "train_loss": 0.004326285133712717,
+      "val_avg_precision": 0.5162553879699697,
+      "val_auc_roc": 0.9841427615959002,
+      "lr": 0.0003,
+      "seconds": 2308.9254232540006
+    },
+    {
+      "epoch": 2,
+      "train_loss": 0.00300112860008615,
+      "val_avg_precision": 0.5187163896144359,
+      "val_auc_roc": 0.985938727566025,
+      "lr": 0.0003,
+      "seconds": 2051.2713996560014
+    },
+    {
+      "epoch": 3,
+      "train_loss": 0.002939199277786741,
+      "val_avg_precision": 0.5431307115805732,
+      "val_auc_roc": 0.9874135634056644,
+      "lr": 0.0003,
+      "seconds": 1718.6383610800003
+    },
+    {
+      "epoch": 4,
+      "train_loss": 0.00290268410421824,
+      "val_avg_precision": 0.5430402013447581,
+      "val_auc_roc": 0.9882907785677346,
+      "lr": 0.0003,
+      "seconds": 1644.4003428879987
+    },
+    {
+      "epoch": 5,
+      "train_loss": 0.00288058559457943,
+      "val_avg_precision": 0.5680963215026256,
+      "val_auc_roc": 0.9887918243789685,
+      "lr": 0.0003,
+      "seconds": 1537.4716160559983
+    },
+    {
+      "epoch": 6,
+      "train_loss": 0.002871991063197914,
+      "val_avg_precision": 0.5742198553519524,
+      "val_auc_roc": 0.9892225089118842,
+      "lr": 0.0003,
+      "seconds": 1136.8732003929981
+    },
+    {
+      "epoch": 7,
+      "train_loss": 0.00285983948385828,
+      "val_avg_precision": 0.562560757340086,
+      "val_auc_roc": 0.9894120491059627,
+      "lr": 0.0003,
+      "seconds": 1136.7910371459984
+    },
+    {
+      "epoch": 8,
+      "train_loss": 0.0028542119514012657,
+      "val_avg_precision": 0.5643548390096186,
+      "val_auc_roc": 0.9894544764038874,
+      "lr": 0.0003,
+      "seconds": 1136.8745837290007
+    },
+    {
+      "epoch": 9,
+      "train_loss": 0.0028488406784352603,
+      "val_avg_precision": 0.5612947468628336,
+      "val_auc_roc": 0.9896570913596302,
+      "lr": 0.0003,
+      "seconds": 1136.711927706001
+    }
+  ],
+  "train_seconds": 13807.957891907998,
+  "config": {
+    "data": "data/raw/HI-Large_Trans.csv",
+    "max_events": null,
+    "no_cache": false,
+    "train_frac": 0.6,
+    "val_frac": 0.1,
+    "memory_dim": 128,
+    "time_dim": 128,
+    "embedding_dim": 128,
+    "neighbor_size": 50,
+    "layers": 2,
+    "hop2_size": null,
+    "no_txn_features": false,
+    "no_activity_features": false,
+    "activity_in_attention": false,
+    "epochs": 30,
+    "batch_size": 4000,
+    "lr": 0.0003,
+    "pos_weight": 1.0,
+    "max_grad_norm": null,
+    "patience": 3,
+    "seed": 42,
+    "device": null,
+    "cpu_threads": null,
+    "out_dir": "outputs/final/large",
+    "resume": true,
+    "save_scores": true,
+    "device_used": "cuda",
+    "events_device": "cuda:0",
+    "cpu_threads_used": 2
+  },
+  "environment": {
+    "python": "3.12.3",
+    "torch": "2.15.0+cu132",
+    "torch_geometric": "2.8.1",
+    "numpy": "2.5.4",
+    "gpu": "NVIDIA H100 80GB HBM3"
+  }
+}
