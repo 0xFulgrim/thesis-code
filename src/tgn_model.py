@@ -5,10 +5,11 @@ Approach:
   - Transactions are processed in strict chronological order as a stream.
   - Each account has a persistent memory vector (TGN, Rossi et al. 2020),
     updated by a GRU from the transactions the account takes part in.
-  - A temporal attention layer (TransformerConv) embeds an account from its
-    memory and its most recent counterparties.
+  - Two temporal attention layers (TransformerConv) embed an account from
+    its memory, its most recent transactions and those of its counterparties.
   - An MLP scores each transaction from the embeddings of its two accounts,
-    the transaction's own attributes, and how recently each account was active.
+    the transaction's own attributes, running activity statistics of both
+    accounts, and counts describing the payment pattern around them.
   - The split is TIME-BASED: first 60% train, next 10% validation, last 30%
     test. Random splits leak future information into training.
 
@@ -739,8 +740,9 @@ def get_args(argv: list | None = None) -> argparse.Namespace:
     g.add_argument("--memory_dim", type=int, default=128)
     g.add_argument("--time_dim", type=int, default=128)
     g.add_argument("--embedding_dim", type=int, default=128)
-    g.add_argument("--neighbor_size", type=int, default=10)
-    g.add_argument("--layers", type=int, default=1, choices=(1, 2),
+    g.add_argument("--neighbor_size", type=int, default=50,
+                   help="Most recent transactions kept and looked at for each account")
+    g.add_argument("--layers", type=int, default=2, choices=(1, 2),
                    help="Attention layers: with 2, an account also sees its neighbours' neighbours")
     g.add_argument("--hop2_size", type=int, default=None,
                    help="With 2 layers: recent transactions looked at for each neighbour "
