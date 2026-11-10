@@ -786,6 +786,11 @@ def get_args(argv: list | None = None) -> argparse.Namespace:
 
 def main(argv: list | None = None) -> dict:
     args = get_args(argv)
+    # The tensors of a stream vary in size from step to step. PyTorch's default
+    # GPU allocator then holds on to far more memory than is in use (6.9 GB
+    # against a peak of 2.6 GB at batch 4000 on HI-Small); this setting keeps
+    # it at the peak. It has to be in place before the first GPU allocation.
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     set_seed(args.seed)
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
