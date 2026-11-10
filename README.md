@@ -39,10 +39,12 @@ pip install pytest
 pytest -q
 ```
 
-**2. Check the real data end to end** on its first 200,000 transactions:
+**2. Check the real data end to end** on its first million transactions.
+(Laundering is rare at the start of the files: the first 200,000 transactions
+of HI-Small contain only 10 cases, the first million 278.)
 
 ```
-python src/tgn_model.py --data data/raw/HI-Small_Trans.csv --max_events 200000 --epochs 1
+python src/tgn_model.py --data data/raw/HI-Small_Trans.csv --max_events 1000000 --epochs 1
 ```
 
 **3. Full run.**
