@@ -216,8 +216,8 @@ Of the laundering that does belong to a scheme, one run of the model catches
 
 It catches 72% of the transactions that open a scheme, 88% of those from the
 sixth onwards, and at least one transaction in 219 of the 226 schemes that
-reach into the test split. Every transaction it flags was paid by ACH, the
-format of all scheme laundering.
+reach into the test split. Every laundering transaction it catches was paid
+by ACH, the format of nearly all scheme laundering.
 
 ## Speed
 
