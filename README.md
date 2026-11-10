@@ -24,9 +24,10 @@ decision threshold chosen on the validation split. AP is average precision.
 The four runs used 30 neighbours; a single run with the default 50 scores
 AP 0.667 and F1 0.682. The averaged model flags 1,827 transactions, 1,458 of
 them correctly, and raises an alert on 1,553 of the 2,844 accounts involved
-in laundering, half of them at their first laundering transaction. See
-"Reading the scores" for what the quiet days are and why recall cannot get
-much past 0.7 on this file.
+in laundering. For at least nine in ten of those accounts the alert comes in
+the same minute as their first laundering transaction in the test stream.
+See "Reading the scores" for what the quiet days are and why recall cannot
+get much past 0.7 on this file.
 
 What each change contributed, one run each with the same seed:
 
@@ -35,8 +36,8 @@ What each change contributed, one run each with the same seed:
 | Balanced class weight and gradient clipping (the first version's training settings) | 0.332 | 0.371 | 0.388 |
 | Unweighted loss, no clipping | 0.528 | 0.576 | 0.599 |
 | + payment direction and same-bank flag | 0.530 | 0.561 | 0.580 |
-| + account activity statistics | 0.562 | 0.602 | 0.619 |
-| + payment-pattern counts | 0.562 | 0.612 | 0.632 |
+| + account activity statistics and pair history | 0.562 | 0.602 | 0.619 |
+| + shared-counterparty and fan-in/fan-out counts | 0.562 | 0.612 | 0.632 |
 | 20 neighbours instead of 10 | 0.578 | 0.641 | 0.656 |
 | Two attention layers, 30 neighbours | 0.607 | 0.655 | 0.669 |
 | Two attention layers, 50 neighbours (the default) | 0.624 | 0.667 | 0.682 |
