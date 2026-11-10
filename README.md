@@ -239,6 +239,14 @@ sixth onwards, and at least one transaction in 219 of the 226 schemes that
 reach into the test split. Every laundering transaction it catches was paid
 by ACH, the format of nearly all scheme laundering.
 
+The larger files show the same picture:
+
+| File | Scheme laundering caught | Schemes with a transaction caught | Laundering outside schemes caught |
+|---|---|---|---|
+| HI-Small | 84% (1,410 of 1,680) | 219 of 226 | 4 of 641 |
+| HI-Medium | 88% (9,067 of 10,343) | 1,471 of 1,501 | 15 of 3,804 |
+| HI-Large | 86% (58,147 of 67,279) | 9,096 of 9,377 | 12 of 30,114 |
+
 ## Speed
 
 Measured on one NVIDIA H100, alone on the GPU, in the middle of the HI-Small
