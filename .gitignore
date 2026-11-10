@@ -1,16 +1,19 @@
 # Python
 __pycache__/
 *.py[cod]
+.pytest_cache/
 
 # Virtual environments
 .venv/
 venv/
 
-# Dataset — downloaded from Kaggle, see README
+# Dataset and its parsed cache — downloaded from Kaggle, see README
 data/
+*.events.npz
 
-# TGN checkpoint: holds a memory vector for every account, so it is large
-outputs/tgn_model.pt
+# Checkpoints and saved scores: large (they hold state for every account)
+outputs/*.pt
+outputs/*.npz
 
 # Editors / OS
 .vscode/
