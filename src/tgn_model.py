@@ -59,7 +59,7 @@ from evaluation import (
 RESUME_LOCKED = (
     "data", "max_events", "train_frac", "val_frac",
     "memory_dim", "time_dim", "embedding_dim", "neighbor_size", "layers",
-    "no_txn_features", "no_activity_features",
+    "no_txn_features", "no_activity_features", "activity_in_attention",
     "batch_size", "lr", "pos_weight", "max_grad_norm", "seed",
 )
 
@@ -370,6 +370,7 @@ class TGN(torch.nn.Module):
         device: torch.device,
         num_layers: int = 1,
         use_activity_features: bool = True,
+        activity_in_attention: bool = False,
     ):
         super().__init__()
         msg_dim = encoder.out_channels
@@ -382,8 +383,9 @@ class TGN(torch.nn.Module):
         self.activity = AccountActivity(num_nodes)
         # The time encoder is shared between the memory and the embedding.
         # Past transactions carry one more feature there: which way the money went.
+        self.activity_in_attention = activity_in_attention
         self.gnn = GraphAttentionEmbedding(
-            in_channels=memory_dim,
+            in_channels=memory_dim + (AccountActivity.out_channels if activity_in_attention else 0),
             out_channels=embedding_dim,
             msg_dim=msg_dim + 1,
             time_enc=self.memory.time_enc,
@@ -393,7 +395,7 @@ class TGN(torch.nn.Module):
         if use_txn_features:
             extra += msg_dim + 4          # the transaction, and two recency features per account
         if use_activity_features:
-            extra += 2 * AccountActivity.out_channels + 2   # both accounts' activity, and their history together
+            extra += 2 * AccountActivity.out_channels + 10   # both accounts' activity, and the local structure
         self.classifier = TransactionClassifier(embedding_dim, extra)
 
         self.register_buffer("assoc", torch.empty(num_nodes, dtype=torch.long), persistent=False)
@@ -412,16 +414,55 @@ class TGN(torch.nn.Module):
         self.activity.reset_state()
         self.neighbors.reset_state()
 
-    def pair_history(self, batch: Batch, events: Events) -> Tensor:
+    def local_structure(self, batch: Batch, events: Events) -> Tensor:
         """
-        How often, among the payer's most recent transactions, it paid this
-        receiver before, and how often the receiver paid it (log counts).
+        What the two accounts' most recent transactions say about the payment
+        pattern this transaction is part of (log counts):
+
+          earlier payments from payer to receiver, and back                  2
+          third accounts X both dealt with, by who paid whom:
+            payer paid X, X paid receiver   (a second route for the money)
+            receiver paid X, X paid payer   (this payment closes a loop)
+            both paid X                     (they fan in to X)
+            X paid both                     (X fans out to them)              4
+          different accounts the payer recently paid / was paid by           2
+          the same for the receiver                                          2
         """
-        e_id = self.neighbors.e_id[batch.src]                  # [B, size], -1 = empty slot
-        with_receiver = (e_id >= 0) & (self.neighbors.neighbors[batch.src] == batch.dst.unsqueeze(-1))
-        payer = events.src[e_id.clamp(min=0).to(events.src.device)].to(batch.src.device)
-        paid = payer == batch.src.unsqueeze(-1)
-        counts = torch.stack([(with_receiver & paid).sum(-1), (with_receiver & ~paid).sum(-1)], dim=-1)
+        device = batch.src.device
+        src, dst = batch.src.unsqueeze(-1), batch.dst.unsqueeze(-1)
+
+        def recent(account: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+            e_id = self.neighbors.e_id[account]                     # [B, size]; -1 marks an empty slot
+            partner = self.neighbors.neighbors[account]
+            payer = events.src[e_id.clamp(min=0).to(events.src.device)].to(device)
+            return e_id >= 0, partner, payer == account.unsqueeze(-1)
+
+        def distinct(partner: Tensor, mask: Tensor) -> Tensor:
+            ordered = torch.where(mask, partner, torch.full_like(partner, -1)).sort(dim=-1).values
+            changes = (ordered[:, 1:] != ordered[:, :-1]) & (ordered[:, 1:] >= 0)
+            return changes.sum(-1) + (ordered[:, 0] >= 0)
+
+        s_valid, s_partner, s_paid = recent(batch.src)
+        d_valid, d_partner, d_paid = recent(batch.dst)
+
+        together = s_valid & (s_partner == dst)
+        s_third = s_valid & (s_partner != src) & (s_partner != dst)
+        d_third = d_valid & (d_partner != src) & (d_partner != dst)
+        shared = (s_partner.unsqueeze(2) == d_partner.unsqueeze(1)) & s_third.unsqueeze(2) & d_third.unsqueeze(1)
+        sp, dp = s_paid.unsqueeze(2), d_paid.unsqueeze(1)
+
+        counts = torch.stack([
+            (together & s_paid).sum(-1),
+            (together & ~s_paid).sum(-1),
+            (shared & sp & ~dp).sum((1, 2)),
+            (shared & ~sp & dp).sum((1, 2)),
+            (shared & sp & dp).sum((1, 2)),
+            (shared & ~sp & ~dp).sum((1, 2)),
+            distinct(s_partner, s_valid & s_paid),
+            distinct(s_partner, s_valid & ~s_paid),
+            distinct(d_partner, d_valid & d_paid),
+            distinct(d_partner, d_valid & ~d_paid),
+        ], dim=-1)
         return torch.log1p(counts.to(torch.float32))
 
     def forward(self, batch: Batch, events: Events) -> tuple[Tensor, Tensor]:
@@ -444,7 +485,11 @@ class TGN(torch.nn.Module):
         # Each past transaction is attended to by one of its two accounts:
         # tell the layer whether that account was the payer.
         was_payer = (past.src == n_id[edge_index[1]]).to(msg.dtype).unsqueeze(-1)
-        z = self.gnn(memory, last_update, edge_index, past.t,
+        x = memory
+        if self.activity_in_attention:
+            # Every account's statistics as they stand at the end of the batch's time span.
+            x = torch.cat([memory, self.activity(n_id, batch.t.max().expand(n_id.numel()))], dim=-1)
+        z = self.gnn(x, last_update, edge_index, past.t,
                      torch.cat([self.encoder(past), was_payer], dim=-1))
 
         src, dst = self.assoc[batch.src], self.assoc[batch.dst]
@@ -455,7 +500,7 @@ class TGN(torch.nn.Module):
             extra += [
                 self.activity(batch.src, batch.t),
                 self.activity(batch.dst, batch.t),
-                self.pair_history(batch, events),
+                self.local_structure(batch, events),
             ]
         return self.classifier(z[src], z[dst], torch.cat(extra, dim=-1) if extra else None), msg
 
@@ -629,7 +674,10 @@ def get_args(argv: list | None = None) -> argparse.Namespace:
     g.add_argument("--no_txn_features", action="store_true",
                    help="Ablation: the classifier does not see the transaction's own attributes")
     g.add_argument("--no_activity_features", action="store_true",
-                   help="Ablation: the classifier does not see account activity statistics")
+                   help="Ablation: the classifier does not see account activity statistics "
+                        "or the local payment structure")
+    g.add_argument("--activity_in_attention", action="store_true",
+                   help="Also give the attention layers every account's activity statistics")
 
     g = p.add_argument_group("training")
     g.add_argument("--epochs", type=int, default=30)
@@ -730,6 +778,7 @@ def main(argv: list | None = None) -> dict:
         device=device,
         num_layers=args.layers,
         use_activity_features=not args.no_activity_features,
+        activity_in_attention=args.activity_in_attention,
     )
     # `stream` is what the model reads; `events` stays on the CPU for the metrics.
     stream = place_events(events, device)

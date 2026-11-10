@@ -136,15 +136,50 @@ def test_activity_matches_a_per_account_reference():
                 r["first"] = r["first"] or int(t[j])
 
 
-def test_pair_history_counts_earlier_payments_each_way():
-    events = tiny_stream([(0, 1), (0, 1), (1, 0), (2, 1), (0, 1), (1, 0), (2, 0)])
+def structure_counts(pairs: list, n_past: int) -> list:
+    """local_structure of the transactions after the first n_past, as plain counts."""
+    events = tiny_stream(pairs)
     model = small_model(events)
-    past = events.rows(slice(0, 4), model.device)
+    past = events.rows(slice(0, n_past), model.device)
     model.update_state(past, model.encoder(past))
+    queries = events.rows(slice(n_past, len(pairs)), model.device)
+    return torch.expm1(model.local_structure(queries, events)).round().int().tolist()
 
-    queries = events.rows(slice(4, 7), model.device)       # 0 pays 1, 1 pays 0, 2 pays 0
-    counts = torch.expm1(model.pair_history(queries, events)).round().tolist()
-    assert counts == [[2.0, 1.0], [1.0, 2.0], [0.0, 0.0]]
+
+def test_local_structure_counts_earlier_payments_each_way():
+    counts = structure_counts([(0, 1), (0, 1), (1, 0), (2, 1), (0, 1), (1, 0), (2, 0)], n_past=4)
+    # columns 0 and 1: payer paid receiver before / receiver paid payer before
+    assert [row[:2] for row in counts] == [[2, 1], [1, 2], [0, 0]]
+
+
+def test_local_structure_sees_shared_counterparties():
+    # 0 pays 9, 9 pays 1 | 3 pays 8, 8 pays 2 | 4 and 5 both pay 7 | 7 pays both 10 and 11
+    past = [(0, 9), (9, 1), (3, 8), (8, 2), (4, 7), (5, 7), (7, 10), (7, 11)]
+    queries = [
+        (0, 1),      # 0 paid 9 and 9 paid 1: a second route from payer to receiver
+        (2, 3),      # 3 paid 8 and 8 paid 2: paying 3 back closes the loop
+        (4, 5),      # both paid 7
+        (10, 11),    # 7 paid both
+        (0, 2),      # nothing shared
+    ]
+    counts = structure_counts(past + queries, n_past=len(past))
+    assert [row[2:6] for row in counts] == [
+        [1, 0, 0, 0],
+        [0, 1, 0, 0],
+        [0, 0, 1, 0],
+        [0, 0, 0, 1],
+        [0, 0, 0, 0],
+    ]
+
+
+def test_local_structure_counts_distinct_counterparties():
+    # Account 0 pays 1 twice, pays 2 and 3 once, and is paid by 4 twice.
+    past = [(0, 1), (0, 1), (0, 2), (4, 0), (0, 3), (4, 0)]
+    counts = structure_counts(past + [(0, 4)], n_past=len(past))
+    # columns 6-9: payer paid / was paid by, receiver paid / was paid by (distinct accounts)
+    # small_model keeps the 5 most recent transactions of an account: for 0 that
+    # drops its first payment to 1, leaving payments to 1, 2, 3 and from 4.
+    assert counts[0][6:] == [3, 1, 1, 0]
 
 
 def test_attention_is_told_which_way_the_money_went():
