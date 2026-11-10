@@ -5,18 +5,19 @@ import os
 
 import numpy as np
 import pytest
+import torch
 
 from tgn_model import main
 
 SMALL = [
-    "--device", "cpu", "--no_cache",
+    "--no_cache",
     "--memory_dim", "16", "--time_dim", "8", "--embedding_dim", "16",
     "--neighbor_size", "5", "--batch_size", "50", "--lr", "1e-3",
 ]
 
 
-def run(csv_path, out_dir, *extra):
-    return main(["--data", csv_path, "--out_dir", str(out_dir), *SMALL, *extra])
+def run(csv_path, out_dir, *extra, device="cpu"):
+    return main(["--data", csv_path, "--out_dir", str(out_dir), "--device", device, *SMALL, *extra])
 
 
 def reject_constant(name):
@@ -81,8 +82,7 @@ def test_resume_of_a_finished_run_only_re_evaluates(csv_path, tmp_path):
 def test_resume_rejects_changed_settings(csv_path, tmp_path):
     run(csv_path, tmp_path, "--epochs", "1")
     with pytest.raises(SystemExit, match="memory_dim"):
-        main(["--data", csv_path, "--out_dir", str(tmp_path), *SMALL,
-              "--memory_dim", "32", "--epochs", "2", "--resume"])
+        run(csv_path, tmp_path, "--memory_dim", "32", "--epochs", "2", "--resume")
 
 
 def test_ablation_and_truncation_run(csv_path, tmp_path):
@@ -90,3 +90,14 @@ def test_ablation_and_truncation_run(csv_path, tmp_path):
                   "--max_events", "2000", "--pos_weight", "5")
     assert results["data"]["transactions"] == 2000
     assert results["config"]["pos_weight_used"] == 5
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_end_to_end_on_gpu(csv_path, tmp_path):
+    """The same pipeline on the GPU, including an interrupted-and-resumed run."""
+    run(csv_path, tmp_path, "--epochs", "1", device="cuda")
+    results = run(csv_path, tmp_path, "--epochs", "2", "--resume", "--save_scores", device="cuda")
+    assert len(results["history"]) == 2
+    assert results["config"]["device_used"].startswith("cuda")
+    assert 0.0 <= results["test"]["avg_precision"] <= 1.0
+    assert results["environment"]["gpu"] is not None

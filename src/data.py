@@ -24,7 +24,7 @@ import torch.nn.functional as F
 DEFAULT_TRANS_PATH = os.path.join("data", "raw", "HI-Small_Trans.csv")
 
 # Bump when the cached arrays change meaning, so stale caches are re-parsed.
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 
 COLUMNS = [
     "timestamp", "from_bank", "from_account", "to_bank", "to_account",
@@ -199,11 +199,15 @@ def _parse_csv(path: str, chunksize: int, log: Callable[[str], None]) -> dict:
                          na_filter=False, chunksize=chunksize)
     for chunk in reader:
         n = len(chunk)
+        # Bank ids are numbers and may be written with leading zeros, so
+        # compare them by value. Account numbers are compared as text.
+        from_bank = chunk["from_bank"].str.lstrip("0")
+        to_bank = chunk["to_bank"].str.lstrip("0")
         # Payer and receiver are interleaved row by row, so accounts are
         # numbered in order of first appearance whatever the chunk size.
         node = _encode(_interleave(
-            chunk["from_bank"].str.cat(chunk["from_account"], sep="_"),
-            chunk["to_bank"].str.cat(chunk["to_account"], sep="_"),
+            from_bank.str.cat(chunk["from_account"], sep="_"),
+            to_bank.str.cat(chunk["to_account"], sep="_"),
         ), accounts, "account").reshape(n, 2)
         currency = _encode(_interleave(
             chunk["payment_currency"], chunk["receiving_currency"],

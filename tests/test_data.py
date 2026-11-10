@@ -49,6 +49,21 @@ def test_load_matches_the_csv(transactions, csv_path):
     assert np.array_equal(events.y.numpy(), frame["is_laundering"].to_numpy())
 
 
+def test_bank_ids_compare_by_value_and_accounts_as_text(transactions, tmp_path):
+    rows = transactions.iloc[:4].copy()
+    rows["from_bank"] = ["010", "10", "0010", "11"]              # three spellings of bank 10
+    rows["from_account"] = ["8000A", "8000A", "8000A", "8000A"]
+    rows["to_bank"] = ["7", "7", "7", "7"]
+    rows["to_account"] = ["0123", "123", "0123", "0123"]         # 0123 and 123 are different accounts
+    path = tmp_path / "Banks_Trans.csv"
+    write_csv(rows, path)
+    events = load_events(str(path), use_cache=False, log=quiet)
+
+    assert events.src.tolist() == [0, 0, 0, 3]
+    assert events.dst.tolist() == [1, 2, 1, 1]
+    assert events.num_nodes == 4
+
+
 def test_chunked_parse_equals_single_pass(csv_path):
     whole = load_events(csv_path, use_cache=False, log=quiet)
     chunked = load_events(csv_path, use_cache=False, chunksize=377, log=quiet)
