@@ -157,3 +157,41 @@ def test_ensemble_of_two_runs(csv_path, tmp_path):
         alone = json.load(f)
     assert single["test"] == alone["test"]
     assert single["validation"] == alone["validation"]
+
+
+def test_scheme_report(transactions, tmp_path):
+    from conftest import write_csv
+
+    import scheme_report
+
+    path = tmp_path / "Schemes_Trans.csv"
+    write_csv(transactions, path)
+    with open(path) as f:
+        lines = f.read().splitlines()[1:]
+    laundering = [line for line in lines if line.endswith(",1")]
+    # Put the last 12 laundering rows (all in the test split) into two schemes.
+    patterns = tmp_path / "Schemes_Patterns.txt"
+    with open(patterns, "w") as f:
+        f.write("BEGIN LAUNDERING ATTEMPT - FAN-OUT:  Max 7-degree Fan-Out\n")
+        f.write("\n".join(laundering[-12:-5]) + "\n")
+        f.write("END LAUNDERING ATTEMPT - FAN-OUT\n\n")
+        f.write("BEGIN LAUNDERING ATTEMPT - CYCLE:  Max 5 hops\n")
+        f.write("\n".join(laundering[-5:]) + "\n")
+        f.write("END LAUNDERING ATTEMPT - CYCLE\n")
+
+    out = tmp_path / "out"
+    results = main(["--data", str(path), "--out_dir", str(out), "--device", "cpu",
+                    "--memory_dim", "16", "--time_dim", "8", "--embedding_dim", "16",
+                    "--neighbor_size", "5", "--batch_size", "50", "--lr", "1e-3",
+                    "--epochs", "2", "--save_scores"])
+    report = scheme_report.main(["--data", str(path), "--patterns", str(patterns), "--run", str(out)])
+
+    assert report["by_scheme"]["FAN-OUT"][0] == 7
+    assert report["by_scheme"]["CYCLE"][0] == 5
+    assert report["by_position"]["first"][0] == 2
+    assert report["schemes"] == 2
+    total = sum(count for count, _ in report["by_scheme"].values())
+    caught = sum(hits for _, hits in report["by_scheme"].values())
+    assert total == results["data"]["splits"]["test"]["laundering"]
+    assert caught == results["test"]["tp"]
+    assert report["false_alarms"] == results["test"]["fp"]

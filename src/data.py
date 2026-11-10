@@ -24,7 +24,7 @@ import torch.nn.functional as F
 DEFAULT_TRANS_PATH = os.path.join("data", "raw", "HI-Small_Trans.csv")
 
 # Bump when the cached arrays change meaning, so stale caches are re-parsed.
-CACHE_VERSION = 3
+CACHE_VERSION = 4
 
 COLUMNS = [
     "timestamp", "from_bank", "from_account", "to_bank", "to_account",
@@ -245,6 +245,9 @@ def _parse_csv(path: str, chunksize: int, log: Callable[[str], None]) -> dict:
         raise ValueError(f"{path} contains no transactions")
 
     arrays = {k: np.concatenate(v) for k, v in parts.items()}
+    # Position of every transaction in the CSV (0 = first data row), kept in
+    # the cache so that results can be traced back to the file's rows.
+    arrays["row"] = np.arange(rows, dtype=np.int64)
 
     # Codes were handed out in order of first appearance; renumber them
     # alphabetically so the feature layout does not depend on row order.
