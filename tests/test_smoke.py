@@ -136,3 +136,24 @@ def test_end_to_end_on_gpu(csv_path, tmp_path):
     assert results["config"]["device_used"].startswith("cuda")
     assert 0.0 <= results["test"]["avg_precision"] <= 1.0
     assert results["environment"]["gpu"] is not None
+
+
+def test_ensemble_of_two_runs(csv_path, tmp_path):
+    import ensemble
+
+    runs = []
+    for seed in ("1", "2"):
+        run(csv_path, tmp_path / seed, "--epochs", "3", "--seed", seed, "--save_scores")
+        runs.append(str(tmp_path / seed))
+    results = ensemble.main(runs)
+
+    assert results["test"]["threshold"] == results["validation"]["threshold"]
+    assert 0.0 <= results["test"]["avg_precision"] <= 1.0
+    assert results["test_active_days"] == results["test"]          # no quiet days in the synthetic file
+
+    # Averaging one run with itself changes nothing.
+    single = ensemble.evaluate([runs[0], runs[0]])
+    with open(tmp_path / "1" / "tgn_metrics.json") as f:
+        alone = json.load(f)
+    assert single["test"] == alone["test"]
+    assert single["validation"] == alone["validation"]

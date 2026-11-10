@@ -653,7 +653,8 @@ def get_args(argv: list | None = None) -> argparse.Namespace:
     g.add_argument("--resume", action="store_true",
                    help="Continue from the checkpoint in --out_dir, if there is one")
     g.add_argument("--save_scores", action="store_true",
-                   help="Also save the test scores, for plots without re-running")
+                   help="Also save the validation and test scores, for plots and "
+                        "ensembles without re-running")
     return p.parse_args(argv)
 
 
@@ -675,6 +676,7 @@ def main(argv: list | None = None) -> dict:
     checkpoint_path = os.path.join(args.out_dir, "tgn_checkpoint.pt")
     metrics_path = os.path.join(args.out_dir, "tgn_metrics.json")
     scores_path = os.path.join(args.out_dir, "tgn_test_scores.npz")
+    val_scores_path = os.path.join(args.out_dir, "tgn_val_scores.npz")
 
     log(f"Device: {device}  (CPU threads: {torch.get_num_threads()})")
 
@@ -813,6 +815,11 @@ def main(argv: list | None = None) -> dict:
                 "formats": events.formats,
                 "args": vars(args),
             }, model_path)
+            if args.save_scores:
+                # Validation scores of the kept epoch: what a threshold for an
+                # ensemble of several runs has to be chosen on.
+                np.savez_compressed(val_scores_path + ".tmp.npz", score=val_prob, label=y_val)
+                os.replace(val_scores_path + ".tmp.npz", val_scores_path)
         else:
             epochs_no_improve += 1
 
@@ -920,7 +927,7 @@ def main(argv: list | None = None) -> dict:
             scores_path,
             score=test_prob, label=y_test,
             src=src_test.astype(np.int32), dst=dst_test.astype(np.int32), t=t_test,
-            threshold=threshold,
+            threshold=threshold, active_day=active,
         )
         log(f"Scores  → {scores_path}")
 
