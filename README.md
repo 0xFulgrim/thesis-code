@@ -33,16 +33,19 @@ their first laundering transaction in the test stream. See "Reading the
 scores" for what the quiet days are and why recall cannot get much past 0.7
 on this file.
 
-**HI-Medium** (test split: 9,569,472 transactions, 14,147 of them
-laundering), one run with the same settings at batch 4000:
+**HI-Medium and HI-Large**, one run each with the same settings at batch 4000:
 
-| Model | Test AP | F1 | Precision | Recall | AP without quiet days | F1 without quiet days |
-|---|---|---|---|---|---|---|
-| Current model, one run | 0.726 | 0.745 | 0.886 | 0.642 | 0.623 | 0.661 |
+| File | Test transactions | Laundering | Test AP | F1 | Precision | Recall | AP without quiet days | F1 without quiet days |
+|---|---|---|---|---|---|---|---|---|
+| HI-Medium | 9,569,472 | 14,147 | 0.726 | 0.745 | 0.886 | 0.642 | 0.623 | 0.661 |
+| HI-Large | 53,910,669 | 97,393 | 0.708 | 0.718 | 0.900 | 0.597 | 0.605 | 0.640 |
 
-It flags 10,250 transactions, 9,082 of them correctly, and raises an alert on
-9,787 of the 17,121 accounts involved in laundering. Training took 30 epochs
-and 153 minutes on an H100 that other runs were sharing.
+On HI-Medium the model flags 10,250 transactions, 9,082 of them correctly,
+and raises an alert on 9,787 of the 17,121 accounts involved in laundering.
+On HI-Large it flags 64,622 transactions, 58,159 of them correctly, and
+raises an alert on 56,209 of 107,985 accounts. Training took 30 epochs and
+153 minutes on HI-Medium and 9 epochs and 230 minutes on HI-Large, on an H100
+that other runs were sharing for part of the time.
 
 **What each change contributed** on HI-Small, one run each with the same seed:
 
@@ -59,8 +62,8 @@ and 153 minutes on an H100 that other runs were sharing.
 | Two attention layers, 50 neighbours (the default) | 0.624 | 0.667 | 0.682 |
 
 The metrics files behind the first two tables are in `outputs/`: `hi-small/`
-for the five runs and their average, `hi-medium/`, and `first-version/` for
-the first version.
+for the five runs and their average, `hi-medium/`, `hi-large/`, and
+`first-version/` for the first version.
 
 Differences of about 0.01 in validation AP and 0.02 in test F1 are within the
 spread between seeds; in particular 30 and 50 neighbours are not
