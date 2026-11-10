@@ -1,7 +1,12 @@
 import numpy as np
 import pytest
 
-from evaluation import best_f1_threshold, classification_metrics, detection_latency
+from evaluation import (
+    best_f1_threshold,
+    classification_metrics,
+    detection_latency,
+    quiet_day_mask,
+)
 
 
 def test_threshold_maximises_f1():
@@ -64,3 +69,20 @@ def test_detection_latency_without_mules_or_detections():
     missed = detection_latency(src, dst, t, np.array([0, 1]), np.array([False, False]))
     assert missed["mule_accounts"] == 2 and missed["detected_accounts"] == 0
     assert missed["median_latency_seconds"] is None
+
+
+def test_quiet_day_mask():
+    day = 86_400
+    start = 1_662_000_000 // day * day                 # a midnight
+    busy = [start + d * day + np.arange(1000) * 60 for d in (0, 1, 2, 4)]
+    quiet = [start + 3 * day + np.arange(5) * 60, start + 6 * day + np.arange(9) * 60]
+    t = np.sort(np.concatenate(busy + quiet))
+    mask = quiet_day_mask(t)
+    assert mask.sum() == 14
+    assert set((t[mask] - start) // day) == {3, 6}
+    assert not quiet_day_mask(np.concatenate(busy)).any()
+
+    # Still found when the quiet days outnumber the busy ones.
+    many_quiet = [start + d * day + np.arange(3) * 60 for d in range(10, 40)]
+    t = np.sort(np.concatenate(busy + many_quiet))
+    assert quiet_day_mask(t).sum() == 90

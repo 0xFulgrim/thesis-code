@@ -116,6 +116,17 @@ def test_head_shrinks_the_node_count(csv_path):
     assert head.num_nodes <= events.num_nodes
 
 
+def test_to_device_keeps_the_stream(csv_path):
+    events = load_events(csv_path, use_cache=False, log=quiet)
+    moved = events.to(torch.device("cpu"))
+    for name in ("src", "dst", "t", "amount", "cat", "y"):
+        assert torch.equal(getattr(events, name), getattr(moved, name)), name
+    assert (moved.num_nodes, moved.currencies, moved.formats) == \
+           (events.num_nodes, events.currencies, events.formats)
+    n = events.num_events
+    assert events.nbytes == n * (8 + 8 + 8 + 2 * 4 + 3 + 1)
+
+
 def test_encoder_layout(csv_path):
     events = load_events(csv_path, use_cache=False, log=quiet)
     encoder = TransactionEncoder.fit(events, train_end=events.num_events)

@@ -13,6 +13,32 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
+SECONDS_PER_DAY = 86_400
+
+
+# ── Quiet days ────────────────────────────────────────────────────────────────
+
+def quiet_day_mask(t: np.ndarray, fraction: float = 0.01) -> np.ndarray:
+    """
+    Marks the transactions that fall on a quiet calendar day: one with fewer
+    than `fraction` of the transactions of a typical day.
+
+    The IBM AML files end with a long run of such days. Normal activity has
+    stopped by then and most of what is left is laundering (in HI-Small, 655
+    of the last 1,108 transactions), so those days flatter any model. They all
+    land in the test split; reporting the test metrics with and without them
+    shows how much of a result they account for.
+
+    The typical day is the one the median transaction falls on. That stays a
+    busy day however many quiet days there are, because they hold so little.
+    """
+    day = t // SECONDS_PER_DAY
+    day = day - day.min()
+    per_day = np.bincount(day)
+    typical = np.median(per_day[day])
+    return (per_day < fraction * typical)[day]
+
+
 # ── Threshold ─────────────────────────────────────────────────────────────────
 
 def best_f1_threshold(y_true: np.ndarray, y_score: np.ndarray) -> float:

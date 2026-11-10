@@ -18,15 +18,24 @@ Evaluation:
     split is scored once, with that threshold.
   - Detection latency: for each mule account, the time from its first
     laundering transaction in the test stream to its first alert at or after it.
+  - The test metrics are also reported without the quiet days at the end of
+    the files, where almost every remaining transaction is laundering.
+
+Training settings: the loss is unweighted and gradients are not clipped by
+default. On HI-Small, a class weight of about 1,300 combined with clipping at
+1.0 scaled the gradients of batches that contain laundering down by a factor
+of 100 to 10,000, and the model stalled (validation AP 0.33 against 0.53).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import platform
 import random
+import sys
 import time
 
 import numpy as np
@@ -43,6 +52,7 @@ from evaluation import (
     classification_metrics,
     detection_latency,
     format_report,
+    quiet_day_mask,
 )
 
 # Settings that must not change between a run and its --resume.
@@ -337,19 +347,33 @@ class TGN(torch.nn.Module):
 # ── Training / eval helpers ───────────────────────────────────────────────────
 
 class Progress:
-    """Logs throughput at most once a minute, so long passes show signs of life."""
+    """Logs throughput and time left at most once a minute, so long passes show signs of life."""
 
     def __init__(self, label: str, total: int):
         self.label = label
         self.total = total
         self.start = self.last = time.monotonic()
 
-    def update(self, done: int) -> None:
-        now = time.monotonic()
-        if now - self.last >= 60:
-            self.last = now
-            rate = done / (now - self.start)
-            log(f"      {self.label}: {done / self.total:4.0%}  ({rate:,.0f} transactions/s)")
+    def due(self) -> bool:
+        return time.monotonic() - self.last >= 60
+
+    def report(self, done: int, extra: str = "") -> None:
+        self.last = time.monotonic()
+        rate = done / (self.last - self.start)
+        minutes_left = (self.total - done) / rate / 60
+        log(f"      {self.label}: {done / self.total:4.0%}  ({rate:,.0f} transactions/s, "
+            f"about {minutes_left:,.0f} min left{extra})")
+
+
+def mean_loss(loss_sum: Tensor, count: int) -> float:
+    """Mean loss so far. Stops the run if it is no longer a finite number."""
+    mean = loss_sum.item() / max(count, 1)
+    if not math.isfinite(mean):
+        raise FloatingPointError(
+            "The training loss is no longer finite. The last finished epoch is "
+            "still checkpointed; try a lower --lr, or set --max_grad_norm."
+        )
+    return mean
 
 
 def train_epoch(
@@ -360,7 +384,7 @@ def train_epoch(
     batch_size: int,
     optimizer: torch.optim.Optimizer,
     criterion: torch.nn.Module,
-    max_grad_norm: float,
+    max_grad_norm: float | None,
 ) -> float:
     """
     One pass over the training stream in time order. The stream state is
@@ -369,7 +393,9 @@ def train_epoch(
     model.train()
     model.reset_state()
 
-    total_loss = 0.0
+    # Summed on the device and read about once a minute: reading the loss of
+    # every batch would make the GPU wait for the Python loop each time.
+    loss_sum = torch.zeros((), dtype=torch.float64, device=model.device)
     progress = Progress("train", end - start)
 
     for lo in range(start, end, batch_size):
@@ -380,16 +406,18 @@ def train_epoch(
         logits, msg = model(batch, events)
         loss = criterion(logits, batch.y.to(logits.dtype))
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+        if max_grad_norm is not None:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
         optimizer.step()
 
         # Update AFTER the batch was scored and the weights were stepped.
         model.update_state(batch, msg)
 
-        total_loss += loss.detach().item() * (hi - lo)
-        progress.update(hi - start)
+        loss_sum += loss.detach() * (hi - lo)
+        if progress.due():
+            progress.report(hi - start, f", loss {mean_loss(loss_sum, hi - start):.6f}")
 
-    return total_loss / max(end - start, 1)
+    return mean_loss(loss_sum, end - start)
 
 
 @torch.no_grad()
@@ -400,19 +428,20 @@ def score_stream(model: TGN, events: Events, start: int, end: int, batch_size: i
     into the stream state, as it would be in live use.
     """
     model.eval()
-    scores = torch.empty(end - start, dtype=torch.float64)
+    # float64: float32 sigmoids saturate at 1.0 and tie the top scores.
+    scores = torch.empty(end - start, dtype=torch.float64, device=model.device)
     progress = Progress("score", end - start)
 
     for lo in range(start, end, batch_size):
         hi = min(lo + batch_size, end)
         batch = events.rows(slice(lo, hi), model.device)
         logits, msg = model(batch, events)
-        # float64: float32 sigmoids saturate at 1.0 and tie the top scores.
-        scores[lo - start:hi - start] = torch.sigmoid(logits.double()).cpu()
+        scores[lo - start:hi - start] = torch.sigmoid(logits.double())
         model.update_state(batch, msg)
-        progress.update(hi - start)
+        if progress.due():
+            progress.report(hi - start)
 
-    return scores.numpy()
+    return scores.cpu().numpy()
 
 
 def replay_neighbors(model: TGN, events: Events, segments: list, batch_size: int) -> None:
@@ -428,6 +457,20 @@ def replay_neighbors(model: TGN, events: Events, segments: list, batch_size: int
             model.neighbors.insert(
                 events.src[lo:hi].to(model.device), events.dst[lo:hi].to(model.device),
             )
+
+
+def place_events(events: Events, device: torch.device) -> Events:
+    """
+    Put the event tensors on the GPU when they fit comfortably. Every batch
+    looks up thousands of past transactions; doing that on the CPU costs a
+    round trip per batch, and with many CPU threads it was the slowest step.
+    """
+    if device.type != "cuda":
+        return events
+    free_bytes, _ = torch.cuda.mem_get_info(device)
+    if events.nbytes > 0.5 * free_bytes:
+        return events
+    return events.to(device)
 
 
 def save_atomic(obj: dict, path: str) -> None:
@@ -464,18 +507,22 @@ def get_args(argv: list | None = None) -> argparse.Namespace:
 
     g = p.add_argument_group("training")
     g.add_argument("--epochs", type=int, default=30)
-    g.add_argument("--batch_size", type=int, default=200)
-    g.add_argument("--lr", type=float, default=1e-4)
-    g.add_argument("--pos_weight", type=float, default=None,
-                   help="Loss weight of laundering transactions "
-                        "(default: negatives / positives in the training split)")
-    g.add_argument("--max_grad_norm", type=float, default=1.0)
+    g.add_argument("--batch_size", type=int, default=1000,
+                   help="Transactions per step. The time per step barely depends on it, "
+                        "so larger batches are proportionally faster")
+    g.add_argument("--lr", type=float, default=3e-4)
+    g.add_argument("--pos_weight", type=float, default=1.0,
+                   help="Loss weight of laundering transactions (1 = unweighted)")
+    g.add_argument("--max_grad_norm", type=float, default=None,
+                   help="Clip the gradient norm at this value (default: no clipping)")
     g.add_argument("--patience", type=int, default=5,
                    help="Early stopping patience (epochs, based on val average precision)")
     g.add_argument("--seed", type=int, default=42)
 
     g = p.add_argument_group("run")
     g.add_argument("--device", default=None, help="cuda, cuda:1, cpu ... (default: cuda if available)")
+    g.add_argument("--cpu_threads", type=int, default=None,
+                   help="CPU threads for PyTorch (default: 2 on a GPU, PyTorch's own choice on a CPU)")
     g.add_argument("--out_dir", default="outputs")
     g.add_argument("--resume", action="store_true",
                    help="Continue from the checkpoint in --out_dir, if there is one")
@@ -491,13 +538,19 @@ def main(argv: list | None = None) -> dict:
     set_seed(args.seed)
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
+    # On a GPU the CPU only drives the loop. More threads do not help, and they
+    # fight each other when several runs share a machine.
+    cpu_threads = args.cpu_threads or (2 if device.type == "cuda" else None)
+    if cpu_threads is not None:
+        torch.set_num_threads(cpu_threads)
+
     os.makedirs(args.out_dir, exist_ok=True)
     model_path = os.path.join(args.out_dir, "tgn_model.pt")
     checkpoint_path = os.path.join(args.out_dir, "tgn_checkpoint.pt")
     metrics_path = os.path.join(args.out_dir, "tgn_metrics.json")
     scores_path = os.path.join(args.out_dir, "tgn_test_scores.npz")
 
-    log(f"Device: {device}")
+    log(f"Device: {device}  (CPU threads: {torch.get_num_threads()})")
 
     # ── 1. Load data ──────────────────────────────────────────────────────────
     log("[1/5] Loading transactions...")
@@ -548,23 +601,19 @@ def main(argv: list | None = None) -> dict:
         use_txn_features=not args.no_txn_features,
         device=device,
     )
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    # `stream` is what the model reads; `events` stays on the CPU for the metrics.
+    stream = place_events(events, device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, fused=device.type == "cuda")
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="max", factor=0.5, patience=3,
     )
-
-    # pos_weight from the training split only — not the full dataset
-    n_train_launder = split_stats["train"]["laundering"]
-    pos_weight = args.pos_weight
-    if pos_weight is None:
-        pos_weight = (train_end - n_train_launder) / n_train_launder
     criterion = torch.nn.BCEWithLogitsLoss(
-        pos_weight=torch.tensor([pos_weight], dtype=torch.float, device=device),
+        pos_weight=torch.tensor([args.pos_weight], dtype=torch.float, device=device),
     )
 
     log(f"      Parameters   : {sum(p.numel() for p in model.parameters()):,}")
     log(f"      Feature dim  : {model.encoder.out_channels}")
-    log(f"      pos_weight   : {pos_weight:.1f}")
+    log(f"      Events on    : {stream.src.device}")
 
     # ── 4. Training with early stopping on val average precision ──────────────
     history: list = []
@@ -601,11 +650,11 @@ def main(argv: list | None = None) -> dict:
         epoch_start = time.monotonic()
 
         train_loss = train_epoch(
-            model, events, 0, train_end, args.batch_size,
+            model, stream, 0, train_end, args.batch_size,
             optimizer, criterion, args.max_grad_norm,
         )
         # Val: continue from the end-of-train stream state (don't reset)
-        val_prob = score_stream(model, events, train_end, val_end, args.batch_size)
+        val_prob = score_stream(model, stream, train_end, val_end, args.batch_size)
         val_ap = float(average_precision_score(y_val, val_prob))
         val_auc = float(roc_auc_score(y_val, val_prob))
         scheduler.step(val_ap)
@@ -665,20 +714,40 @@ def main(argv: list | None = None) -> dict:
     log(f"[4/5] Restoring epoch {best_epoch} (val AP {best_ap:.4f}) and scoring the test stream...")
     best = torch.load(model_path, map_location="cpu", weights_only=True)
     model.load_state_dict(best["model"])
-    replay_neighbors(model, events, [splits["train"], splits["validation"]], args.batch_size)
+    replay_neighbors(model, stream, [splits["train"], splits["validation"]], args.batch_size)
 
-    test_prob = score_stream(model, events, val_end, num_events, args.batch_size)
+    test_prob = score_stream(model, stream, val_end, num_events, args.batch_size)
 
     # ── 6. Metrics ────────────────────────────────────────────────────────────
     log("[5/5] Computing metrics...")
     threshold = best["threshold"]
+    flagged = test_prob >= threshold
+    src_test = events.src[val_end:].numpy()
+    dst_test = events.dst[val_end:].numpy()
+    t_test = events.t[val_end:].numpy()
+
     test_metrics = classification_metrics(y_test, test_prob, threshold)
-    latency = detection_latency(
-        events.src[val_end:].numpy(), events.dst[val_end:].numpy(),
-        events.t[val_end:].numpy(), y_test, test_prob >= threshold,
+    latency = detection_latency(src_test, dst_test, t_test, y_test, flagged)
+
+    # The same again without the quiet days at the end of the file.
+    active = ~quiet_day_mask(events.t.numpy())[val_end:]
+    active_metrics = classification_metrics(y_test[active], test_prob[active], threshold)
+    active_latency = detection_latency(
+        src_test[active], dst_test[active], t_test[active], y_test[active], flagged[active],
     )
+    quiet = {
+        "transactions": int((~active).sum()),
+        "laundering": int(y_test[~active].sum()),
+    }
+
     print(format_report("TGN — validation (threshold selected here)", best["validation"]))
-    print(format_report("TGN — test", test_metrics, latency), flush=True)
+    print(format_report("TGN — test", test_metrics, latency))
+    if quiet["transactions"]:
+        print(format_report(
+            f"TGN — test without quiet days ({quiet['transactions']:,} transactions, "
+            f"{quiet['laundering']:,} laundering left out)", active_metrics, active_latency,
+        ))
+    sys.stdout.flush()
 
     results = {
         "data": {
@@ -687,14 +756,22 @@ def main(argv: list | None = None) -> dict:
             "transactions": num_events,
             "laundering": n_launder,
             "splits": split_stats,
+            "quiet_days_in_test": quiet,
         },
         "best_epoch": best_epoch,
         "validation": best["validation"],
         "test": test_metrics,
         "detection_latency": latency,
+        "test_active_days": active_metrics,
+        "detection_latency_active_days": active_latency,
         "history": history,
         "train_seconds": sum(h["seconds"] for h in history),
-        "config": {**vars(args), "pos_weight_used": pos_weight, "device_used": str(device)},
+        "config": {
+            **vars(args),
+            "device_used": str(device),
+            "events_device": str(stream.src.device),
+            "cpu_threads_used": torch.get_num_threads(),
+        },
         "environment": {
             "python": platform.python_version(),
             "torch": torch.__version__,
@@ -714,9 +791,7 @@ def main(argv: list | None = None) -> dict:
         np.savez_compressed(
             scores_path,
             score=test_prob, label=y_test,
-            src=events.src[val_end:].numpy().astype(np.int32),
-            dst=events.dst[val_end:].numpy().astype(np.int32),
-            t=events.t[val_end:].numpy(),
+            src=src_test.astype(np.int32), dst=dst_test.astype(np.int32), t=t_test,
             threshold=threshold,
         )
         log(f"Scores  → {scores_path}")

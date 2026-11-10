@@ -58,7 +58,7 @@ class Batch(NamedTuple):
 
 @dataclass
 class Events:
-    """Every transaction of a file in chronological order, kept on the CPU."""
+    """Every transaction of a file in chronological order."""
     src: torch.Tensor      # int64
     dst: torch.Tensor      # int64
     t: torch.Tensor        # int64
@@ -73,14 +73,23 @@ class Events:
     def num_events(self) -> int:
         return self.src.numel()
 
+    @property
+    def nbytes(self) -> int:
+        return sum(x.numel() * x.element_size() for x in self._tensors())
+
+    def _tensors(self) -> tuple:
+        return (self.src, self.dst, self.t, self.amount, self.cat, self.y)
+
+    def to(self, device: torch.device) -> Events:
+        """The same stream with its tensors on `device`."""
+        src, dst, t, amount, cat, y = (x.to(device) for x in self._tensors())
+        return Events(src, dst, t, amount, cat, y, self.num_nodes, self.currencies, self.formats)
+
     def rows(self, index: slice | torch.Tensor, device: torch.device) -> Batch:
-        """The selected transactions, moved to `device`."""
+        """The selected transactions, on `device`."""
         if isinstance(index, torch.Tensor):
             index = index.to(self.src.device)
-        return Batch(*(
-            x[index].to(device)
-            for x in (self.src, self.dst, self.t, self.amount, self.cat, self.y)
-        ))
+        return Batch(*(x[index].to(device) for x in self._tensors()))
 
     def head(self, n: int) -> Events:
         """The first n transactions, with the node count shrunk to match."""

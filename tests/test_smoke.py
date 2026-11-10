@@ -4,6 +4,7 @@ import json
 import os
 
 import numpy as np
+import pandas as pd
 import pytest
 import torch
 
@@ -25,7 +26,7 @@ def reject_constant(name):
 
 
 def test_end_to_end(csv_path, tmp_path):
-    results = run(csv_path, tmp_path, "--epochs", "2", "--save_scores")
+    results = run(csv_path, tmp_path, "--epochs", "4", "--save_scores")
 
     for name in ("tgn_metrics.json", "tgn_model.pt", "tgn_checkpoint.pt", "tgn_test_scores.npz"):
         assert os.path.exists(tmp_path / name), name
@@ -33,8 +34,8 @@ def test_end_to_end(csv_path, tmp_path):
     with open(tmp_path / "tgn_metrics.json") as f:
         saved = json.load(f, parse_constant=reject_constant)
     assert saved["test"] == results["test"]
-    assert len(saved["history"]) == 2
-    assert saved["best_epoch"] in (1, 2)
+    assert len(saved["history"]) == 4
+    assert 1 <= saved["best_epoch"] <= 4
 
     # The threshold comes from validation and is the one applied to the test split.
     assert saved["test"]["threshold"] == saved["validation"]["threshold"]
@@ -44,11 +45,16 @@ def test_end_to_end(csv_path, tmp_path):
     assert counts["tp"] + counts["fp"] + counts["fn"] + counts["tn"] == \
         saved["data"]["splits"]["test"]["transactions"]
 
+    # The synthetic file has no quiet days, so leaving them out changes nothing.
+    assert saved["data"]["quiet_days_in_test"] == {"transactions": 0, "laundering": 0}
+    assert saved["test_active_days"] == saved["test"]
+    assert saved["detection_latency_active_days"] == saved["detection_latency"]
+
     scores = np.load(tmp_path / "tgn_test_scores.npz")
     assert scores["score"].shape == scores["label"].shape == scores["t"].shape
     assert int((scores["score"] >= scores["threshold"]).sum()) == counts["tp"] + counts["fp"]
 
-    # The planted signal is learnable: after two epochs the ranking should be
+    # The planted signal is learnable: after four epochs the ranking should be
     # well above the laundering rate, which is what a random scorer gets.
     test_split = saved["data"]["splits"]["test"]
     base_rate = test_split["laundering"] / test_split["transactions"]
@@ -87,9 +93,38 @@ def test_resume_rejects_changed_settings(csv_path, tmp_path):
 
 def test_ablation_and_truncation_run(csv_path, tmp_path):
     results = run(csv_path, tmp_path, "--epochs", "1", "--no_txn_features",
-                  "--max_events", "2000", "--pos_weight", "5")
+                  "--max_events", "2000", "--pos_weight", "5", "--max_grad_norm", "1.0")
     assert results["data"]["transactions"] == 2000
-    assert results["config"]["pos_weight_used"] == 5
+    assert results["config"]["pos_weight"] == 5
+    assert results["config"]["max_grad_norm"] == 1.0
+
+
+def test_a_diverging_run_stops_with_a_clear_error(csv_path, tmp_path):
+    with pytest.raises(FloatingPointError, match="no longer finite"):
+        run(csv_path, tmp_path, "--epochs", "1", "--lr", "1e30")
+
+
+def test_quiet_days_are_reported_separately(transactions, tmp_path):
+    # Append a run of nearly empty days in which almost everything is laundering,
+    # as at the end of the real files.
+    from conftest import write_csv
+    tail = transactions.iloc[:40].copy()
+    start = np.datetime64("2022-09-15T10:00")
+    tail["timestamp"] = [
+        str(start + np.timedelta64(i * 13, "h")).replace("-", "/").replace("T", " ") for i in range(40)
+    ]
+    tail["is_laundering"] = [1] * 30 + [0] * 10
+    path = tmp_path / "Tail_Trans.csv"
+    write_csv(pd.concat([transactions, tail]), path)
+
+    results = main(["--data", str(path), "--out_dir", str(tmp_path / "out"), "--device", "cpu",
+                    *SMALL, "--epochs", "1"])
+    assert results["data"]["quiet_days_in_test"] == {"transactions": 40, "laundering": 30}
+    n_test = results["data"]["splits"]["test"]["transactions"]
+    counts = results["test_active_days"]
+    assert counts["tp"] + counts["fp"] + counts["fn"] + counts["tn"] == n_test - 40
+    assert results["detection_latency_active_days"]["mule_accounts"] <= \
+        results["detection_latency"]["mule_accounts"]
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
