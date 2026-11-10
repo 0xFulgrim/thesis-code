@@ -42,7 +42,7 @@ laundering), one run with the same settings at batch 4000:
 
 It flags 10,250 transactions, 9,082 of them correctly, and raises an alert on
 9,787 of the 17,121 accounts involved in laundering. Training took 30 epochs
-of about 4 to 5 minutes each on an H100 that other runs were sharing.
+and 153 minutes on an H100 that other runs were sharing.
 
 **What each change contributed** on HI-Small, one run each with the same seed:
 
