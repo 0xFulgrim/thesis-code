@@ -45,6 +45,9 @@ What each change contributed, one run each with the same seed:
 | Two attention layers, 30 neighbours | 0.607 | 0.655 | 0.669 |
 | Two attention layers, 50 neighbours (the default) | 0.624 | 0.667 | 0.682 |
 
+The metrics files behind the first table are in `outputs/`: `hi-small/` for
+the five runs and their average, `first-version/` for the first version.
+
 Differences of about 0.01 in validation AP and 0.02 in test F1 are within the
 spread between seeds; in particular 30 and 50 neighbours are not
 distinguishable (test AP 0.655 over four seeds against 0.661 over five).
@@ -250,4 +253,5 @@ src/
   ensemble.py        evaluate the average of several runs
   scheme_report.py   results by laundering scheme
 tests/               unit tests and end-to-end runs on synthetic data
+outputs/             metrics files of the reported runs
 ```
